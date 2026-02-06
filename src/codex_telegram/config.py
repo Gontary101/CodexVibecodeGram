@@ -30,6 +30,7 @@ class Settings:
     sqlite_path: Path
     runs_dir: Path
     codex_workdir: Path
+    codex_allowed_workdirs: tuple[Path, ...]
     codex_ephemeral_cmd_template: str
     codex_session_cmd_template: str
     codex_session_boot_cmd_template: str | None
@@ -80,6 +81,20 @@ def _get_path(name: str, default: str) -> Path:
     return Path(value).expanduser().resolve()
 
 
+def _get_path_list(name: str) -> tuple[Path, ...]:
+    raw = os.getenv(name, "")
+    values = [item.strip() for item in raw.split(",") if item.strip()]
+    return tuple(Path(item).expanduser().resolve() for item in values)
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 def _get_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -103,12 +118,25 @@ def _get_extensions() -> tuple[str, ...]:
 def load_settings() -> Settings:
     _load_env_file(Path(".env"))
 
+    codex_workdir = _get_path("CODEX_WORKDIR", ".")
+    allowed_workdirs = _get_path_list("CODEX_ALLOWED_WORKDIRS")
+    if not allowed_workdirs:
+        allowed_workdirs = (codex_workdir,)
+    for root in allowed_workdirs:
+        if root == codex_workdir and not root.exists():
+            root.mkdir(parents=True, exist_ok=True)
+        if not root.exists() or not root.is_dir():
+            raise ConfigError(f"Invalid CODEX_ALLOWED_WORKDIRS entry (not a directory): {root}")
+    if not any(_is_within(codex_workdir, root) for root in allowed_workdirs):
+        raise ConfigError("CODEX_WORKDIR must be inside CODEX_ALLOWED_WORKDIRS")
+
     settings = Settings(
         telegram_bot_token=_require_str("TELEGRAM_BOT_TOKEN"),
         owner_telegram_id=int(_require_str("OWNER_TELEGRAM_ID")),
         sqlite_path=_get_path("SQLITE_PATH", "data/state.sqlite3"),
         runs_dir=_get_path("RUNS_DIR", "runs"),
-        codex_workdir=_get_path("CODEX_WORKDIR", "."),
+        codex_workdir=codex_workdir,
+        codex_allowed_workdirs=allowed_workdirs,
         codex_ephemeral_cmd_template=os.getenv(
             "CODEX_EPHEMERAL_CMD_TEMPLATE",
             "codex exec {prompt_quoted}",

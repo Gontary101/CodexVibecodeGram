@@ -31,6 +31,7 @@ Commands:
 /permissions [auto|read-only|full-access|workspace-write|danger-full-access|reset] - set execution permissions
 /approvals [untrusted|on-failure|on-request|never|reset] - show/set Codex approval policy
 /search [live|cached|disabled|on|off|reset] - show/set web search mode for Codex jobs
+/workdir [show|set <path>|reset] - show/set Codex working directory (allowlist enforced)
 /experimental [list|clear|on <feature>|off <feature>] - toggle experimental features
 /personality [friendly|pragmatic|none|custom <instruction>] - response style preset
 /mcp [list|get <name>] - inspect configured MCP servers
@@ -212,6 +213,7 @@ def _render_experimental_status(orchestrator: Orchestrator, catalog: list[tuple[
 
 def _format_runtime(orchestrator: Orchestrator) -> str:
     profile = orchestrator.get_runtime_profile()
+    allowed_roots = ", ".join(str(p) for p in orchestrator.get_allowed_workdirs())
     return "\n".join(
         [
             "Runtime profile:",
@@ -221,6 +223,8 @@ def _format_runtime(orchestrator: Orchestrator) -> str:
             f"approvals={profile.approval_policy or '(default)'}",
             f"web_search={profile.web_search or '(default)'}",
             f"personality={profile.personality}",
+            f"workdir={orchestrator.get_effective_workdir()}",
+            f"allowed_workdirs={allowed_roots}",
             "experimental="
             + (", ".join(sorted(profile.experimental_features)) if profile.experimental_features else "(none)"),
         ]
@@ -450,6 +454,45 @@ def build_dispatcher(
             await message.answer(str(exc))
             return
         await message.answer(f"Web search updated: {updated.web_search or '(default)'}")
+
+    @router.message(Command("workdir"))
+    async def workdir_handler(message: Message) -> None:
+        if not await guard.authorize(message):
+            return
+        payload = _args(message).strip()
+        current = orchestrator.get_effective_workdir()
+        allowed = orchestrator.get_allowed_workdirs()
+        allowed_text = ", ".join(str(p) for p in allowed)
+
+        if not payload or payload.lower() in {"show", "list"}:
+            await message.answer(
+                f"workdir={current}\nallowed_roots={allowed_text}\nUsage: /workdir set <path> | /workdir reset"
+            )
+            return
+
+        if payload.lower() in {"reset", "default"}:
+            try:
+                orchestrator.set_workdir(None)
+            except RuntimeProfileError as exc:
+                await message.answer(str(exc))
+                return
+            await message.answer(f"Workdir reset to default: {orchestrator.get_effective_workdir()}")
+            return
+
+        if payload.lower().startswith("set "):
+            path_value = payload[4:].strip()
+            if not path_value:
+                await message.answer("Usage: /workdir set <path>")
+                return
+            try:
+                orchestrator.set_workdir(path_value)
+            except RuntimeProfileError as exc:
+                await message.answer(str(exc))
+                return
+            await message.answer(f"Workdir updated: {orchestrator.get_effective_workdir()}")
+            return
+
+        await message.answer("Usage: /workdir [show|set <path>|reset]")
 
     @router.message(Command("experimental"))
     async def experimental_handler(message: Message) -> None:

@@ -40,10 +40,19 @@ class RuntimeProfile:
     experimental_features: set[str] = field(default_factory=set)
     personality: str = DEFAULT_PERSONALITY_PRESET
     personality_instruction: str = ""
+    workdir_override: Path | None = None
 
 
 def _normalize_feature(name: str) -> str:
     return name.strip().lower().replace(" ", "-")
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _tail_text(path: Path, max_chars: int = 3200) -> str:
@@ -62,6 +71,12 @@ class CodexExecutor:
 
     def get_runtime_profile(self) -> RuntimeProfile:
         return replace(self._runtime, experimental_features=set(self._runtime.experimental_features))
+
+    def get_allowed_workdirs(self) -> tuple[Path, ...]:
+        return self._settings.codex_allowed_workdirs
+
+    def get_effective_workdir(self) -> Path:
+        return self._runtime.workdir_override or self._settings.codex_workdir
 
     def set_model(self, model: str | None, reasoning_effort: str | None = None) -> RuntimeProfile:
         self._runtime.model = model.strip() if model else None
@@ -144,6 +159,27 @@ class CodexExecutor:
 
     def clear_experimental_features(self) -> RuntimeProfile:
         self._runtime.experimental_features.clear()
+        return self.get_runtime_profile()
+
+    def set_workdir(self, path_value: str | None) -> RuntimeProfile:
+        if path_value is None:
+            self._runtime.workdir_override = None
+            return self.get_runtime_profile()
+
+        raw = Path(path_value.strip()).expanduser()
+        if not str(raw):
+            raise RuntimeProfileError("Workdir path cannot be empty.")
+        base = self.get_effective_workdir()
+        candidate = (base / raw).resolve() if not raw.is_absolute() else raw.resolve()
+        if not candidate.exists() or not candidate.is_dir():
+            raise RuntimeProfileError(f"Workdir does not exist or is not a directory: {candidate}")
+
+        allowed = self.get_allowed_workdirs()
+        if not any(_is_within(candidate, root) for root in allowed):
+            allowed_text = ", ".join(str(p) for p in allowed)
+            raise RuntimeProfileError(f"Workdir is outside allowed roots. Allowed: {allowed_text}")
+
+        self._runtime.workdir_override = candidate
         return self.get_runtime_profile()
 
     def _runtime_cli_flags(self) -> list[str]:
@@ -235,13 +271,14 @@ class CodexExecutor:
         prompt_path.write_text(ctx.job.prompt, encoding="utf-8")
 
         plan = self.build_plan(ctx)
+        workdir = self.get_effective_workdir()
 
         proc: asyncio.subprocess.Process | None = None
         try:
             with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
                 proc = await asyncio.create_subprocess_shell(
                     plan.command,
-                    cwd=str(self._settings.codex_workdir),
+                    cwd=str(workdir),
                     env={**os.environ, **plan.env_overrides},
                     stdout=stdout_file,
                     stderr=stderr_file,
@@ -257,6 +294,7 @@ class CodexExecutor:
                         stderr_path=stderr_path,
                         summary="Timed out while executing Codex command",
                         error_text="Job exceeded timeout limit",
+                        exec_cwd=workdir,
                     )
 
             stdout_tail = _tail_text(stdout_path)
@@ -275,6 +313,7 @@ class CodexExecutor:
                 stderr_path=stderr_path,
                 summary=summary,
                 error_text=error_text,
+                exec_cwd=workdir,
             )
         except asyncio.CancelledError:
             if proc and proc.returncode is None:

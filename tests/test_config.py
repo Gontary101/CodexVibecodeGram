@@ -31,6 +31,7 @@ def test_load_settings_from_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     assert settings.sqlite_path == (tmp_path / "data/test.sqlite3").resolve()
     assert settings.runs_dir == (tmp_path / "runs-test").resolve()
     assert settings.codex_workdir == tmp_path.resolve()
+    assert settings.codex_allowed_workdirs == (tmp_path.resolve(),)
     assert settings.codex_skip_git_repo_check is True
     assert settings.sqlite_path.parent.exists()
     assert settings.runs_dir.exists()

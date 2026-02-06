@@ -14,6 +14,7 @@ def _settings(tmp_path: Path) -> Settings:
         sqlite_path=tmp_path / "state.sqlite3",
         runs_dir=tmp_path / "runs",
         codex_workdir=tmp_path,
+        codex_allowed_workdirs=(tmp_path,),
         codex_ephemeral_cmd_template="echo",
         codex_session_cmd_template="echo",
         codex_session_boot_cmd_template=None,

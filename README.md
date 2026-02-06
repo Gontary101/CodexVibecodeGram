@@ -89,6 +89,8 @@ See `.env.example` for full list. Most important settings:
 
 - `CODEX_WORKDIR`:
   Codex execution working directory (default `.`)
+- `CODEX_ALLOWED_WORKDIRS`:
+  Comma-separated allowlist roots used by `/workdir set ...` (default: `CODEX_WORKDIR`)
 - `CODEX_SKIP_GIT_REPO_CHECK=true`:
   Injects `--skip-git-repo-check` into `codex exec` commands
 - `CODEX_EPHEMERAL_CMD_TEMPLATE`:
@@ -113,6 +115,7 @@ See `.env.example` for full list. Most important settings:
 - `/permissions [auto|read-only|full-access|workspace-write|danger-full-access|reset]`
 - `/approvals [untrusted|on-failure|on-request|never|reset]`
 - `/search [live|cached|disabled|on|off|reset]`
+- `/workdir [show|set <path>|reset]`
 - `/experimental [list|clear|on <feature>|off <feature>]`
 - `/personality [friendly|pragmatic|none|custom <instruction>]`
 - `/status`

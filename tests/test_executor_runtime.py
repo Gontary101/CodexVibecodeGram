@@ -15,6 +15,7 @@ def _settings(tmp_path: Path) -> Settings:
         sqlite_path=tmp_path / "state.sqlite3",
         runs_dir=tmp_path / "runs",
         codex_workdir=tmp_path,
+        codex_allowed_workdirs=(tmp_path,),
         codex_ephemeral_cmd_template="codex exec {prompt_quoted}",
         codex_session_cmd_template="codex exec --skip-git-repo-check resume {session_name_quoted} {prompt_quoted}",
         codex_session_boot_cmd_template=None,
@@ -86,3 +87,39 @@ def test_invalid_runtime_values_raise(tmp_path: Path) -> None:
         executor.set_model("gpt-5-codex", "extreme")
     with pytest.raises(RuntimeProfileError):
         executor.set_web_search_mode("always")
+
+
+def test_set_workdir_allows_only_allowed_roots(tmp_path: Path) -> None:
+    allowed_root = tmp_path / "workspace"
+    target = allowed_root / "project"
+    allowed_root.mkdir(parents=True)
+    target.mkdir()
+
+    settings = _settings(tmp_path)
+    settings.codex_workdir = allowed_root
+    settings.codex_allowed_workdirs = (allowed_root,)
+    executor = CodexExecutor(settings)
+
+    executor.set_workdir("project")
+    assert executor.get_effective_workdir() == target.resolve()
+
+    with pytest.raises(RuntimeProfileError):
+        executor.set_workdir("/tmp")
+
+
+def test_set_workdir_reset_restores_default(tmp_path: Path) -> None:
+    allowed_root = tmp_path / "workspace"
+    nested = allowed_root / "nested"
+    allowed_root.mkdir(parents=True)
+    nested.mkdir()
+
+    settings = _settings(tmp_path)
+    settings.codex_workdir = allowed_root
+    settings.codex_allowed_workdirs = (allowed_root,)
+    executor = CodexExecutor(settings)
+
+    executor.set_workdir("nested")
+    assert executor.get_effective_workdir() == nested.resolve()
+
+    executor.set_workdir(None)
+    assert executor.get_effective_workdir() == allowed_root.resolve()
