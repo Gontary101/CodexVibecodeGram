@@ -468,6 +468,57 @@ async def test_dispatcher_model_show_uses_codex_config_values(
 
 
 @pytest.mark.asyncio
+async def test_dispatcher_poll_command_sends_and_registers_test_poll(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sent_texts: list[str] = []
+    sent_polls: list[tuple[str, list[str]]] = []
+
+    async def _fake_call(self, method, request_timeout=None):  # type: ignore[no-untyped-def]
+        name = method.__class__.__name__
+        if name == "SendMessage":
+            sent_texts.append(str(getattr(method, "text", "")))
+            return None
+        if name == "SendPoll":
+            sent_polls.append((str(method.question), [str(option) for option in method.options]))
+            return SimpleNamespace(message_id=333, poll=SimpleNamespace(id="manual-poll-333"))
+        return None
+
+    monkeypatch.setattr(Bot, "__call__", _fake_call)
+
+    bot = Bot("12345:token")
+    orchestrator = FakeOrchestrator()
+    sessions = FakeSessionManager()
+    assistant_polls = AssistantPollStore()
+    dispatcher = build_dispatcher(
+        bot=bot,
+        orchestrator=orchestrator,  # type: ignore[arg-type]
+        session_manager=sessions,  # type: ignore[arg-type]
+        video_service=FakeVideoService(),  # type: ignore[arg-type]
+        owner_user_id=42,
+        command_cooldown_seconds=0.0,
+        runs_dir=tmp_path / "runs",
+        assistant_polls=assistant_polls,
+    )
+
+    await dispatcher.feed_update(bot, _make_update("/poll", user_id=42, chat_id=42, update_id=1))
+
+    assert sent_polls == [
+        (
+            "Poll feature smoke test: does this new poll flow work?",
+            ["Yes, works", "Partially works", "No, needs fixes"],
+        )
+    ]
+    tracked = assistant_polls.get("manual-poll-333")
+    assert tracked is not None
+    assert tracked.chat_id == 42
+    assert tracked.message_id == 333
+    assert tracked.options == ("Yes, works", "Partially works", "No, needs fixes")
+    assert any("Test poll created." in text for text in sent_texts)
+
+
+@pytest.mark.asyncio
 async def test_dispatcher_attachment_message_downloads_and_submits_job(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

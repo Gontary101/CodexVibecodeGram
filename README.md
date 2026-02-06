@@ -126,6 +126,7 @@ See `.env.example` for full list. Most important settings:
 - `/review [scope]`
 - `/diff [scope]`
 - `/plan <task>`
+- `/poll [question | option1 | option2 ...]` (send a manual test poll)
 - `/video <job_id>`
 
 ### Runtime Control Commands

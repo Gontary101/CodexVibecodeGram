@@ -55,6 +55,7 @@ send file or image (optional caption or /run caption) - enqueue attachment-aware
 /review [scope] - run a code-review style Codex job
 /diff [scope] - ask Codex for concise git diff summary
 /plan <task> - ask Codex for a detailed implementation plan
+/poll [question | option1 | option2 ...] - send a manual test poll
 /model [name] [reasoning] - show/set model + reasoning effort
 /permissions [auto|read-only|full-access|workspace-write|danger-full-access|reset] - set execution permissions
 /approvals [untrusted|on-failure|on-request|never|reset] - show/set Codex approval policy
@@ -111,7 +112,7 @@ class CommandGuard:
 def _args(message: Message) -> str:
     text = (message.text or "").strip()
     parts = text.split(maxsplit=1)
-    if len(parts) == 1:
+    if len(parts) < 2:
         return ""
     return parts[1].strip()
 
@@ -764,6 +765,56 @@ def build_dispatcher(
         )
         job = await orchestrator.submit_job(prompt=prompt, mode=JobMode.EPHEMERAL)
         await message.answer(f"Queued planning job {job.id} with status {job.status}")
+
+    @router.message(Command("poll"))
+    async def poll_handler(message: Message) -> None:
+        if not await guard.authorize(message):
+            return
+        payload = _args(message).strip()
+        question = "Poll feature smoke test: does this new poll flow work?"
+        options: tuple[str, ...] = ("Yes, works", "Partially works", "No, needs fixes")
+
+        if payload:
+            raw_parts = [part.strip() for part in payload.split("|")]
+            parts = [part for part in raw_parts if part]
+            if len(parts) < 3:
+                await message.answer("Usage: /poll [question | option1 | option2 | option3 ...]")
+                return
+            question = parts[0][:300]
+            deduped = list(dict.fromkeys(option[:100] for option in parts[1:] if option))
+            if len(deduped) < 2:
+                await message.answer("Poll must include at least 2 distinct non-empty options.")
+                return
+            options = tuple(deduped[:10])
+
+        try:
+            sent = await bot.send_poll(
+                chat_id=_chat_id(message),
+                question=question,
+                options=list(options),
+                is_anonymous=False,
+                allows_multiple_answers=False,
+            )
+        except Exception as exc:
+            await message.answer(f"Failed to send poll: {exc}")
+            return
+
+        if sent.poll is None or not sent.poll.id:
+            await message.answer("Poll sent, but response did not include poll metadata.")
+            return
+
+        active_assistant_polls.register(
+            AssistantPoll(
+                poll_id=sent.poll.id,
+                source_job_id=int(sent.message_id),
+                chat_id=_chat_id(message),
+                message_id=int(sent.message_id),
+                question=question,
+                options=options,
+                allows_multiple_answers=False,
+            )
+        )
+        await message.answer("Test poll created. Vote in the poll to trigger the poll-answer flow.")
 
     @router.message(Command("model"))
     async def model_handler(message: Message) -> None:
