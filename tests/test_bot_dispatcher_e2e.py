@@ -9,6 +9,7 @@ import pytest
 from aiogram import Bot
 from aiogram.types import Update
 
+from codex_telegram.approval_checklists import APPROVAL_TASK_APPROVE, ApprovalChecklist, ApprovalChecklistStore
 from codex_telegram.approval_polls import ApprovalPoll, ApprovalPollStore
 from codex_telegram.assistant_polls import AssistantPoll, AssistantPollStore
 from codex_telegram.bot import build_dispatcher
@@ -189,6 +190,55 @@ def _make_poll_answer_update(
                 "poll_id": poll_id,
                 "option_ids": [option_id],
                 "user": {"id": user_id, "is_bot": False, "first_name": "owner"},
+            },
+        }
+    )
+
+
+def _make_poll_answer_update_with_options(
+    poll_id: str,
+    option_ids: list[int],
+    *,
+    user_id: int,
+    update_id: int = 1,
+) -> Update:
+    return Update.model_validate(
+        {
+            "update_id": update_id,
+            "poll_answer": {
+                "poll_id": poll_id,
+                "option_ids": option_ids,
+                "user": {"id": user_id, "is_bot": False, "first_name": "owner"},
+            },
+        }
+    )
+
+
+def _make_checklist_done_update(
+    *,
+    user_id: int,
+    chat_id: int,
+    update_id: int,
+    checklist_message_id: int,
+    task_ids: list[int],
+) -> Update:
+    return Update.model_validate(
+        {
+            "update_id": update_id,
+            "message": {
+                "message_id": update_id,
+                "date": int(datetime.now(tz=UTC).timestamp()),
+                "chat": {"id": chat_id, "type": "private"},
+                "from": {"id": user_id, "is_bot": False, "first_name": "owner"},
+                "checklist_tasks_done": {
+                    "checklist_message": {
+                        "message_id": checklist_message_id,
+                        "date": int(datetime.now(tz=UTC).timestamp()),
+                        "chat": {"id": chat_id, "type": "private"},
+                    },
+                    "marked_as_done_task_ids": task_ids,
+                    "marked_as_not_done_task_ids": [],
+                },
             },
         }
     )
@@ -423,6 +473,85 @@ async def test_dispatcher_poll_answer_approves_waiting_job(
 
     assert orchestrator.approved_jobs == [(10, 42)]
     assert stopped_polls == [(42, 700)]
+    assert any("Approved job 10" in text for text in sent_texts)
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_unknown_command_returns_fallback_help(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sent_texts: list[str] = []
+
+    async def _fake_call(self, method, request_timeout=None):  # type: ignore[no-untyped-def]
+        if method.__class__.__name__ == "SendMessage":
+            sent_texts.append(str(getattr(method, "text", "")))
+        return None
+
+    monkeypatch.setattr(Bot, "__call__", _fake_call)
+
+    bot = Bot("12345:token")
+    orchestrator = FakeOrchestrator()
+    sessions = FakeSessionManager()
+    dispatcher = build_dispatcher(
+        bot=bot,
+        orchestrator=orchestrator,  # type: ignore[arg-type]
+        session_manager=sessions,  # type: ignore[arg-type]
+        video_service=FakeVideoService(),  # type: ignore[arg-type]
+        owner_user_id=42,
+        command_cooldown_seconds=0.0,
+        runs_dir=tmp_path / "runs",
+    )
+
+    await dispatcher.feed_update(bot, _make_update("/unknown", user_id=42, chat_id=42, update_id=1))
+
+    assert sent_texts == ["Unknown command. Use /start for help."]
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_checklist_done_approves_even_when_rate_limited(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sent_texts: list[str] = []
+
+    async def _fake_call(self, method, request_timeout=None):  # type: ignore[no-untyped-def]
+        if method.__class__.__name__ == "SendMessage":
+            sent_texts.append(str(getattr(method, "text", "")))
+        return None
+
+    monkeypatch.setattr(Bot, "__call__", _fake_call)
+
+    bot = Bot("12345:token")
+    orchestrator = FakeOrchestrator()
+    orchestrator.seed_awaiting_job(10)
+    sessions = FakeSessionManager()
+    approval_checklists = ApprovalChecklistStore()
+    approval_checklists.register(ApprovalChecklist(job_id=10, chat_id=42, message_id=900))
+    dispatcher = build_dispatcher(
+        bot=bot,
+        orchestrator=orchestrator,  # type: ignore[arg-type]
+        session_manager=sessions,  # type: ignore[arg-type]
+        video_service=FakeVideoService(),  # type: ignore[arg-type]
+        owner_user_id=42,
+        command_cooldown_seconds=60.0,
+        runs_dir=tmp_path / "runs",
+        approval_checklists=approval_checklists,
+    )
+
+    await dispatcher.feed_update(bot, _make_update("/status", user_id=42, chat_id=42, update_id=1))
+    await dispatcher.feed_update(
+        bot,
+        _make_checklist_done_update(
+            user_id=42,
+            chat_id=42,
+            update_id=2,
+            checklist_message_id=900,
+            task_ids=[APPROVAL_TASK_APPROVE],
+        ),
+    )
+
+    assert orchestrator.approved_jobs == [(10, 42)]
     assert any("Approved job 10" in text for text in sent_texts)
 
 
@@ -833,3 +962,55 @@ async def test_dispatcher_manual_assistant_poll_answer_omits_fake_job_reference(
     assert mode == JobMode.EPHEMERAL
     assert prompt.startswith("The user answered your poll.\nQuestion: Does this poll flow work?")
     assert "for job" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_assistant_poll_empty_answer_keeps_poll_tracking(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def _fake_call(self, method, request_timeout=None):  # type: ignore[no-untyped-def]
+        return None
+
+    monkeypatch.setattr(Bot, "__call__", _fake_call)
+
+    bot = Bot("12345:token")
+    orchestrator = FakeOrchestrator()
+    sessions = FakeSessionManager()
+    assistant_polls = AssistantPollStore()
+    assistant_polls.register(
+        AssistantPoll(
+            poll_id="assistant-poll-empty",
+            source_job_id=12,
+            chat_id=42,
+            message_id=501,
+            question="Pick one",
+            options=("A", "B"),
+            allows_multiple_answers=False,
+        )
+    )
+    dispatcher = build_dispatcher(
+        bot=bot,
+        orchestrator=orchestrator,  # type: ignore[arg-type]
+        session_manager=sessions,  # type: ignore[arg-type]
+        video_service=FakeVideoService(),  # type: ignore[arg-type]
+        owner_user_id=42,
+        command_cooldown_seconds=0.0,
+        runs_dir=tmp_path / "runs",
+        assistant_polls=assistant_polls,
+    )
+
+    await dispatcher.feed_update(
+        bot,
+        _make_poll_answer_update_with_options("assistant-poll-empty", [], user_id=42, update_id=1),
+    )
+    assert assistant_polls.get("assistant-poll-empty") is not None
+
+    await dispatcher.feed_update(
+        bot,
+        _make_poll_answer_update("assistant-poll-empty", 1, user_id=42, update_id=2),
+    )
+    assert assistant_polls.get("assistant-poll-empty") is None
+    assert orchestrator.submitted
+    prompt, _, _ = orchestrator.submitted[-1]
+    assert "Selected option(s): B" in prompt

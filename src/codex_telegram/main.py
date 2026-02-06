@@ -35,8 +35,8 @@ async def _run_async() -> None:
     repo.ensure_owner(settings.owner_telegram_id)
 
     bot = Bot(token=settings.telegram_bot_token)
-    approval_polls = ApprovalPollStore()
-    approval_checklists = ApprovalChecklistStore()
+    approval_polls = ApprovalPollStore(persistence=repo)
+    approval_checklists = ApprovalChecklistStore(persistence=repo)
     assistant_polls = AssistantPollStore()
 
     notifier = TelegramNotifier(

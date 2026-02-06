@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, Router
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.filters import Command
 from aiogram.types import FSInputFile, Message, PollAnswer
 
@@ -1493,10 +1494,11 @@ def build_dispatcher(
             )
             return
 
-        assistant_poll = active_assistant_polls.pop(answer.poll_id)
-        if assistant_poll is None or not answer.option_ids:
+        assistant_poll = active_assistant_polls.get(answer.poll_id)
+        if assistant_poll is None:
             return
-        await _close_assistant_poll(assistant_poll)
+        if not answer.option_ids:
+            return
         selected_options: list[str] = []
         for raw_idx in answer.option_ids:
             idx = int(raw_idx)
@@ -1505,6 +1507,8 @@ def build_dispatcher(
         if not selected_options:
             await bot.send_message(chat_id=owner_user_id, text="Poll answer had no valid options.")
             return
+        active_assistant_polls.pop(answer.poll_id)
+        await _close_assistant_poll(assistant_poll)
         selected_text = ", ".join(selected_options)
         if assistant_poll.source_job_id is None:
             source_line = "The user answered your poll."
@@ -1716,9 +1720,9 @@ def build_dispatcher(
     @router.message()
     async def attachment_run_handler(message: Message) -> None:
         if message.checklist_tasks_done is not None or message.checklist_tasks_added is not None:
-            return
+            raise SkipHandler()
         if not _has_supported_attachments(message):
-            return
+            raise SkipHandler()
         if not await guard.authorize(message):
             return
         prompt_input = _attachment_prompt_from_message(message)
@@ -1762,12 +1766,12 @@ def build_dispatcher(
 
     @router.message()
     async def fallback_handler(message: Message) -> None:
-        if not await guard.authorize(message):
-            return
         if message.checklist_tasks_done is not None:
             await _handle_checklist_approval_message(message)
             return
         if message.checklist_tasks_added is not None:
+            return
+        if not await guard.authorize(message):
             return
         await message.answer("Unknown command. Use /start for help.")
 

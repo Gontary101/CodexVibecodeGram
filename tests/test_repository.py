@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from codex_telegram.approval_checklists import ApprovalChecklist, ApprovalChecklistStore
+from codex_telegram.approval_polls import ApprovalPoll, ApprovalPollStore
 from codex_telegram.db import Database
 from codex_telegram.models import JobMode, JobStatus, RiskLevel
 from codex_telegram.repository import Repository
@@ -99,3 +101,36 @@ def test_chat_active_session_persistence(tmp_path: Path) -> None:
 
     repo.set_active_session_for_chat(1001, None)
     assert repo.get_active_session_for_chat(1001) is None
+
+
+def test_approval_ui_state_persists_across_store_restarts(tmp_path: Path) -> None:
+    db = Database(tmp_path / "state.sqlite3")
+    db.init_schema()
+    repo = Repository(db)
+
+    job = repo.create_job(
+        prompt="sudo apt install htop",
+        mode=JobMode.EPHEMERAL,
+        session_name=None,
+        risk_level=RiskLevel.MEDIUM,
+        needs_approval=True,
+    )
+    repo.set_job_status(job.id, JobStatus.AWAITING_APPROVAL)
+
+    polls = ApprovalPollStore(persistence=repo)
+    checklists = ApprovalChecklistStore(persistence=repo)
+    polls.register(ApprovalPoll(poll_id="poll-10", job_id=job.id, chat_id=42, message_id=700))
+    checklists.register(ApprovalChecklist(job_id=job.id, chat_id=42, message_id=900))
+
+    polls_after_restart = ApprovalPollStore(persistence=repo)
+    checklists_after_restart = ApprovalChecklistStore(persistence=repo)
+    assert polls_after_restart.get("poll-10") is not None
+    assert checklists_after_restart.get(42, 900) is not None
+
+    assert polls_after_restart.pop_for_job(job.id) is not None
+    assert checklists_after_restart.pop_for_job(job.id) is not None
+
+    polls_after_clear = ApprovalPollStore(persistence=repo)
+    checklists_after_clear = ApprovalChecklistStore(persistence=repo)
+    assert polls_after_clear.get("poll-10") is None
+    assert checklists_after_clear.get(42, 900) is None
