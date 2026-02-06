@@ -20,6 +20,9 @@ class FakeNotifier:
     async def send_text(self, text: str) -> None:
         self.messages.append(text)
 
+    async def send_approval_request(self, job, reason: str) -> None:  # type: ignore[no-untyped-def]
+        self.messages.append(f"approval:{job.id}:{reason}")
+
     async def send_job_status(self, job, heading: str) -> None:  # type: ignore[no-untyped-def]
         self.messages.append(f"{heading}:{job.id}:{job.status}")
 
@@ -48,6 +51,7 @@ async def test_orchestrator_runs_low_risk_job(tmp_path: Path) -> None:
     settings = Settings(
         telegram_bot_token="token",
         owner_telegram_id=1,
+        telegram_business_connection_id=None,
         sqlite_path=tmp_path / "state.sqlite3",
         runs_dir=tmp_path / "runs",
         codex_workdir=tmp_path,
@@ -104,6 +108,7 @@ async def test_orchestrator_waits_for_approval(tmp_path: Path) -> None:
     settings = Settings(
         telegram_bot_token="token",
         owner_telegram_id=1,
+        telegram_business_connection_id=None,
         sqlite_path=tmp_path / "state.sqlite3",
         runs_dir=tmp_path / "runs",
         codex_workdir=tmp_path,

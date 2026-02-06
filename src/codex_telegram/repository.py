@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .approval_checklists import ApprovalChecklist
+from .approval_polls import ApprovalPoll
 from .db import Database
 from .models import Artifact, Job, JobMode, JobStatus, RiskLevel, SessionRecord, SessionStatus, parse_timestamp, serialize_payload
 
@@ -357,4 +359,94 @@ class Repository:
               updated_at=excluded.updated_at
             """,
             (chat_id, session_name, now),
+        )
+
+    def list_approval_polls(self) -> list[ApprovalPoll]:
+        rows = self._db.query_all(
+            """
+            SELECT poll_id, job_id, chat_id, message_id
+            FROM approval_polls
+            ORDER BY created_at ASC, rowid ASC
+            """
+        )
+        return [
+            ApprovalPoll(
+                poll_id=str(row["poll_id"]),
+                job_id=int(row["job_id"]),
+                chat_id=int(row["chat_id"]),
+                message_id=int(row["message_id"]),
+            )
+            for row in rows
+        ]
+
+    def save_approval_poll(self, poll: ApprovalPoll) -> None:
+        now = _now_iso()
+        with self._db.transaction() as conn:
+            conn.execute(
+                "DELETE FROM approval_polls WHERE poll_id=? OR job_id=?",
+                (poll.poll_id, poll.job_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO approval_polls(poll_id, job_id, chat_id, message_id, created_at)
+                VALUES(?, ?, ?, ?, ?)
+                """,
+                (poll.poll_id, poll.job_id, poll.chat_id, poll.message_id, now),
+            )
+
+    def delete_approval_poll(self, poll_id: str) -> None:
+        self._db.execute("DELETE FROM approval_polls WHERE poll_id=?", (poll_id,))
+
+    def list_approval_checklists(self) -> list[ApprovalChecklist]:
+        rows = self._db.query_all(
+            """
+            SELECT chat_id, message_id, job_id, approve_task_id, reject_task_id, revise_task_id
+            FROM approval_checklists
+            ORDER BY created_at ASC, rowid ASC
+            """
+        )
+        return [
+            ApprovalChecklist(
+                job_id=int(row["job_id"]),
+                chat_id=int(row["chat_id"]),
+                message_id=int(row["message_id"]),
+                approve_task_id=int(row["approve_task_id"]),
+                reject_task_id=int(row["reject_task_id"]),
+                revise_task_id=int(row["revise_task_id"]),
+            )
+            for row in rows
+        ]
+
+    def save_approval_checklist(self, checklist: ApprovalChecklist) -> None:
+        now = _now_iso()
+        with self._db.transaction() as conn:
+            conn.execute(
+                """
+                DELETE FROM approval_checklists
+                WHERE (chat_id=? AND message_id=?) OR job_id=?
+                """,
+                (checklist.chat_id, checklist.message_id, checklist.job_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO approval_checklists(
+                  chat_id, message_id, job_id, approve_task_id, reject_task_id, revise_task_id, created_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    checklist.chat_id,
+                    checklist.message_id,
+                    checklist.job_id,
+                    checklist.approve_task_id,
+                    checklist.reject_task_id,
+                    checklist.revise_task_id,
+                    now,
+                ),
+            )
+
+    def delete_approval_checklist(self, chat_id: int, message_id: int) -> None:
+        self._db.execute(
+            "DELETE FROM approval_checklists WHERE chat_id=? AND message_id=?",
+            (chat_id, message_id),
         )

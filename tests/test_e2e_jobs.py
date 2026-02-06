@@ -28,6 +28,9 @@ class RecordingNotifier:
     async def send_text(self, text: str) -> None:
         self.texts.append(text)
 
+    async def send_approval_request(self, job, reason: str) -> None:  # type: ignore[no-untyped-def]
+        self.texts.append(f"Job {job.id} is waiting for approval.\nreason={reason}\nUse /approve {job.id} or /reject {job.id}.")
+
     async def send_job_status(self, job, heading: str) -> None:  # type: ignore[no-untyped-def]
         self.statuses.append((job.id, job.status, heading))
 
@@ -140,6 +143,7 @@ def _settings(tmp_path: Path, workdir: Path) -> Settings:
     return Settings(
         telegram_bot_token="token",
         owner_telegram_id=1,
+        telegram_business_connection_id=None,
         sqlite_path=tmp_path / "state.sqlite3",
         runs_dir=tmp_path / "runs",
         codex_workdir=workdir,

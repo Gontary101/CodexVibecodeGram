@@ -245,10 +245,36 @@ class CodexExecutor:
         rest = command[idx + len(marker) :]
         return f"{start}{marker}--skip-git-repo-check {rest}".strip()
 
+    def _has_output_last_message_flag(self, command: str) -> bool:
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            return "--output-last-message" in command or " -o " in command
+
+        found_exec = False
+        for idx in range(len(tokens) - 1):
+            if tokens[idx] != "codex" or tokens[idx + 1] != "exec":
+                continue
+
+            found_exec = True
+            for token in tokens[idx + 2 :]:
+                if token in {"&&", "||", "|", ";"}:
+                    break
+                if token == "--":
+                    break
+                if token in {"-o", "--output-last-message"}:
+                    return True
+                if token.startswith("-o=") or token.startswith("--output-last-message="):
+                    return True
+        if found_exec:
+            return False
+
+        return "--output-last-message" in command or " -o " in command
+
     def _inject_output_last_message(self, command: str, output_path: Path | None) -> str:
         if output_path is None:
             return command
-        if "--output-last-message" in command or " -o " in command:
+        if self._has_output_last_message_flag(command):
             return command
         quoted = shlex.quote(str(output_path))
         marker = "codex exec "

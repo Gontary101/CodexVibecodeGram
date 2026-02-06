@@ -29,6 +29,7 @@ ALLOWED_APPROVAL_POLICIES = {"untrusted", "on-failure", "on-request", "never"}
 class Settings:
     telegram_bot_token: str
     owner_telegram_id: int
+    telegram_business_connection_id: str | None
     sqlite_path: Path
     runs_dir: Path
     codex_workdir: Path
@@ -146,6 +147,7 @@ def load_settings() -> Settings:
     settings = Settings(
         telegram_bot_token=_require_str("TELEGRAM_BOT_TOKEN"),
         owner_telegram_id=int(_require_str("OWNER_TELEGRAM_ID")),
+        telegram_business_connection_id=os.getenv("TELEGRAM_BUSINESS_CONNECTION_ID"),
         sqlite_path=_get_path("SQLITE_PATH", "data/state.sqlite3"),
         runs_dir=_get_path("RUNS_DIR", "runs"),
         codex_workdir=codex_workdir,

@@ -28,6 +28,7 @@ data/*
 !data/.gitkeep
 runs/*
 !runs/.gitkeep
+.codex_telegram_uploads/*
 
 # SQLite runtime sidecars
 *.sqlite3

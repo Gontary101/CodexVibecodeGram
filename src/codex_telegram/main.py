@@ -6,6 +6,9 @@ import sys
 
 from aiogram import Bot
 
+from .approval_checklists import ApprovalChecklistStore
+from .approval_polls import ApprovalPollStore
+from .assistant_polls import AssistantPollStore
 from .artifacts import ArtifactService
 from .bot import build_dispatcher
 from .config import ConfigError, load_settings
@@ -32,11 +35,18 @@ async def _run_async() -> None:
     repo.ensure_owner(settings.owner_telegram_id)
 
     bot = Bot(token=settings.telegram_bot_token)
+    approval_polls = ApprovalPollStore(persistence=repo)
+    approval_checklists = ApprovalChecklistStore(persistence=repo)
+    assistant_polls = AssistantPollStore()
 
     notifier = TelegramNotifier(
         bot=bot,
         owner_chat_id=settings.owner_telegram_id,
         response_mode=settings.telegram_response_mode,
+        approval_polls=approval_polls,
+        approval_checklists=approval_checklists,
+        assistant_polls=assistant_polls,
+        business_connection_id=settings.telegram_business_connection_id,
     )
     policy = RiskPolicy()
     executor = CodexExecutor(settings)
@@ -62,6 +72,9 @@ async def _run_async() -> None:
         owner_user_id=settings.owner_telegram_id,
         command_cooldown_seconds=settings.command_cooldown_seconds,
         runs_dir=settings.runs_dir,
+        approval_polls=approval_polls,
+        approval_checklists=approval_checklists,
+        assistant_polls=assistant_polls,
     )
 
     await orchestrator.start()

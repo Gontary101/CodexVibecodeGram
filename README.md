@@ -7,6 +7,9 @@ Run Codex tasks from Telegram, track jobs in a queue, and receive results (text 
 - Accepts owner-only Telegram commands
 - Queues Codex tasks and executes them on your server
 - Adds approval gates for risky prompts
+- Sends risky-job approvals as Telegram polls, or checklists when Business mode is configured
+- Accepts direct file/image uploads and injects them into Codex prompts
+- Can emit follow-up Telegram polls when Codex returns multiple-choice questions
 - Persists job state in SQLite
 - Sends natural output replies plus non-log artifacts (images/video/docs)
 - Supports per-chat active sessions with resume/fork workflows (`codex exec resume ...`)
@@ -48,6 +51,7 @@ cp .env.example .env
 
 - `TELEGRAM_BOT_TOKEN`
 - `OWNER_TELEGRAM_ID`
+- `TELEGRAM_BUSINESS_CONNECTION_ID` (optional, enables checklist approvals)
 
 4. Start bot:
 
@@ -103,12 +107,15 @@ See `.env.example` for full list. Most important settings:
   Template for `/run_session` (default uses `codex exec resume ...`)
 - `TELEGRAM_RESPONSE_MODE=natural|compact|verbose`:
   Controls Telegram output verbosity (default is natural answer-only)
+- `TELEGRAM_BUSINESS_CONNECTION_ID`:
+  Optional Telegram Business connection id for checklist-based approval UI; when unset, polls are used.
 
 ## Telegram Commands
 
 ### Task Commands
 
 - `/run <prompt>`
+- Send a file/image with optional caption (or `/run <prompt>` caption) to queue an attachment-aware job
 - `/run_session <session_id> <prompt>` (explicit session)
 - `/new [name]` (create + activate session for this chat)
 - `/resume <session_id_or_name>` (activate/resume for this chat)
@@ -119,6 +126,8 @@ See `.env.example` for full list. Most important settings:
 - `/review [scope]`
 - `/diff [scope]`
 - `/plan <task>`
+- `/poll [question | option1 | option2 ...]` (send a manual test poll)
+- `/featurepolls` (send a curated bundle of roadmap feature polls)
 - `/video <job_id>`
 
 ### Runtime Control Commands
@@ -145,6 +154,11 @@ See `.env.example` for full list. Most important settings:
 - `/session [list|create|stop|use|clear] [name]`
 - `/mcp [list|get <name>]`
 - `/debug-config`
+
+Risky jobs trigger an approval UI automatically:
+- With `TELEGRAM_BUSINESS_CONNECTION_ID`: checklist (Approve / Reject / Suggest changes)
+- Without it: Telegram poll
+You can always still use `/approve` and `/reject`.
 
 ## Run Tests
 

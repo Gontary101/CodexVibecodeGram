@@ -74,6 +74,31 @@ CREATE TABLE IF NOT EXISTS chat_state (
   active_session_name TEXT,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS approval_polls (
+  poll_id TEXT PRIMARY KEY,
+  job_id INTEGER NOT NULL UNIQUE,
+  chat_id INTEGER NOT NULL,
+  message_id INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_approval_polls_job ON approval_polls(job_id);
+
+CREATE TABLE IF NOT EXISTS approval_checklists (
+  chat_id INTEGER NOT NULL,
+  message_id INTEGER NOT NULL,
+  job_id INTEGER NOT NULL UNIQUE,
+  approve_task_id INTEGER NOT NULL,
+  reject_task_id INTEGER NOT NULL,
+  revise_task_id INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(chat_id, message_id),
+  FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_approval_checklists_job ON approval_checklists(job_id);
 """
 
 
