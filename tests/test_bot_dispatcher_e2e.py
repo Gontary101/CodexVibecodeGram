@@ -9,8 +9,9 @@ import pytest
 from aiogram import Bot
 from aiogram.types import Update
 
+from codex_telegram.approval_polls import ApprovalPoll, ApprovalPollStore
 from codex_telegram.bot import build_dispatcher
-from codex_telegram.models import JobMode, SessionRecord, SessionStatus
+from codex_telegram.models import JobMode, JobStatus, SessionRecord, SessionStatus
 from codex_telegram.sessions import SessionCreateResult
 
 
@@ -25,11 +26,36 @@ class FakeOrchestrator:
         self._chat_active: dict[int, str | None] = {}
         self.submitted: list[tuple[str, JobMode, str | None]] = []
         self._job_counter = 0
+        self._job_status: dict[int, JobStatus] = {}
+        self.approved_jobs: list[tuple[int, int]] = []
+        self.rejected_jobs: list[tuple[int, int]] = []
 
     async def submit_job(self, prompt: str, mode: JobMode, session_name: str | None = None):
         self._job_counter += 1
         self.submitted.append((prompt, mode, session_name))
+        self._job_status[self._job_counter] = JobStatus.QUEUED
         return SimpleNamespace(id=self._job_counter, status="queued")
+
+    def seed_awaiting_job(self, job_id: int) -> None:
+        self._job_status[job_id] = JobStatus.AWAITING_APPROVAL
+
+    async def approve_job(self, job_id: int, user_id: int):  # type: ignore[no-untyped-def]
+        current = self._job_status.get(job_id)
+        if current is None:
+            raise KeyError(job_id)
+        if current == JobStatus.AWAITING_APPROVAL:
+            self._job_status[job_id] = JobStatus.QUEUED
+        self.approved_jobs.append((job_id, user_id))
+        return SimpleNamespace(id=job_id, status=self._job_status[job_id])
+
+    async def reject_job(self, job_id: int, user_id: int):  # type: ignore[no-untyped-def]
+        current = self._job_status.get(job_id)
+        if current is None:
+            raise KeyError(job_id)
+        if current == JobStatus.AWAITING_APPROVAL:
+            self._job_status[job_id] = JobStatus.REJECTED
+        self.rejected_jobs.append((job_id, user_id))
+        return SimpleNamespace(id=job_id, status=self._job_status[job_id])
 
     def get_active_session_for_chat(self, chat_id: int) -> str | None:
         return self._chat_active.get(chat_id)
@@ -141,6 +167,25 @@ def _make_update(text: str, *, user_id: int, chat_id: int, update_id: int = 1) -
                 "chat": {"id": chat_id, "type": "private"},
                 "from": {"id": user_id, "is_bot": False, "first_name": "tester"},
                 "text": text,
+            },
+        }
+    )
+
+
+def _make_poll_answer_update(
+    poll_id: str,
+    option_id: int,
+    *,
+    user_id: int,
+    update_id: int = 1,
+) -> Update:
+    return Update.model_validate(
+        {
+            "update_id": update_id,
+            "poll_answer": {
+                "poll_id": poll_id,
+                "option_ids": [option_id],
+                "user": {"id": user_id, "is_bot": False, "first_name": "owner"},
             },
         }
     )
@@ -271,3 +316,48 @@ async def test_dispatcher_session_clear_unsets_chat_pointer(
 
     await dispatcher.feed_update(bot, _make_update("/session clear", user_id=42, chat_id=42, update_id=2))
     assert orchestrator.get_active_session_for_chat(42) is None
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_poll_answer_approves_waiting_job(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sent_texts: list[str] = []
+    stopped_polls: list[tuple[int, int]] = []
+
+    async def _fake_call(self, method, request_timeout=None):  # type: ignore[no-untyped-def]
+        method_name = method.__class__.__name__
+        if method_name == "SendMessage":
+            sent_texts.append(str(getattr(method, "text", "")))
+        if method_name == "StopPoll":
+            stopped_polls.append((int(method.chat_id), int(method.message_id)))
+        return None
+
+    monkeypatch.setattr(Bot, "__call__", _fake_call)
+
+    bot = Bot("12345:token")
+    orchestrator = FakeOrchestrator()
+    orchestrator.seed_awaiting_job(10)
+    sessions = FakeSessionManager()
+    approval_polls = ApprovalPollStore()
+    approval_polls.register(ApprovalPoll(poll_id="poll-10", job_id=10, chat_id=42, message_id=700))
+    dispatcher = build_dispatcher(
+        bot=bot,
+        orchestrator=orchestrator,  # type: ignore[arg-type]
+        session_manager=sessions,  # type: ignore[arg-type]
+        video_service=FakeVideoService(),  # type: ignore[arg-type]
+        owner_user_id=42,
+        command_cooldown_seconds=0.0,
+        runs_dir=tmp_path / "runs",
+        approval_polls=approval_polls,
+    )
+
+    await dispatcher.feed_update(
+        bot,
+        _make_poll_answer_update("poll-10", 0, user_id=42, update_id=1),
+    )
+
+    assert orchestrator.approved_jobs == [(10, 42)]
+    assert stopped_polls == [(42, 700)]
+    assert any("Approved job 10" in text for text in sent_texts)

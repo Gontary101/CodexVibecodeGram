@@ -15,6 +15,7 @@ def _settings(tmp_path: Path) -> Settings:
     return Settings(
         telegram_bot_token="token",
         owner_telegram_id=1,
+        telegram_business_connection_id=None,
         sqlite_path=tmp_path / "state.sqlite3",
         runs_dir=tmp_path / "runs",
         codex_workdir=tmp_path,

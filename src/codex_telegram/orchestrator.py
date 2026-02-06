@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 class NotifierProtocol(Protocol):
     async def send_text(self, text: str) -> None: ...
 
+    async def send_approval_request(self, job: Job, reason: str) -> None: ...
+
     async def send_job_status(self, job: Job, heading: str) -> None: ...
 
     async def send_artifacts(self, artifacts: list) -> None: ...
@@ -91,9 +93,7 @@ class Orchestrator:
 
         if decision.needs_approval:
             self._repo.append_event(job.id, "approval_required", {"reason": decision.reason})
-            await self._notifier.send_text(
-                f"Job {job.id} is waiting for approval.\nreason={decision.reason}\nUse /approve {job.id} or /reject {job.id}."
-            )
+            await self._notifier.send_approval_request(job, decision.reason)
 
         return job
 

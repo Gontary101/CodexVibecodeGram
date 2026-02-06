@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from pathlib import Path
+import shlex
 
 import pytest
 
@@ -12,6 +13,7 @@ def _settings(tmp_path: Path) -> Settings:
     return Settings(
         telegram_bot_token="token",
         owner_telegram_id=1,
+        telegram_business_connection_id=None,
         sqlite_path=tmp_path / "state.sqlite3",
         runs_dir=tmp_path / "runs",
         codex_workdir=tmp_path,
@@ -46,6 +48,17 @@ def _ctx(tmp_path: Path, prompt: str = "hello") -> ExecutionContext:
         needs_approval=False,
     )
     return ExecutionContext(job=job, run_dir=tmp_path / "run", approved=True)
+
+
+def _count_output_last_message_flags(command: str) -> int:
+    tokens = shlex.split(command)
+    count = 0
+    for token in tokens:
+        if token in {"-o", "--output-last-message"}:
+            count += 1
+        elif token.startswith("-o=") or token.startswith("--output-last-message="):
+            count += 1
+    return count
 
 
 def test_runtime_flags_are_injected(tmp_path: Path) -> None:
@@ -137,6 +150,51 @@ def test_default_approval_and_output_path_are_injected(tmp_path: Path) -> None:
     assert "approval_policy=\"on-request\"" in plan.command
     assert "--output-last-message" in plan.command or " -o " in plan.command
     assert str(output_path) in plan.command
+    assert _count_output_last_message_flags(plan.command) == 1
+
+
+def test_output_path_injection_ignores_o_in_prompt_text(tmp_path: Path) -> None:
+    executor = CodexExecutor(_settings(tmp_path))
+
+    output_path = tmp_path / "run" / "assistant_last_message.txt"
+    plan = executor.build_plan(
+        _ctx(tmp_path, "Please explain why the text contains -o in the middle"),
+        output_last_message_path=output_path,
+    )
+
+    assert "approval_policy=\"on-request\"" in plan.command
+    assert "--output-last-message" in plan.command or " -o " in plan.command
+    assert str(output_path) in plan.command
+    assert _count_output_last_message_flags(plan.command) == 1
+
+
+def test_output_path_injection_does_not_duplicate_existing_flag_after_positionals(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    settings.codex_session_cmd_template = (
+        "codex exec resume {session_name_quoted} {prompt_quoted} "
+        "--output-last-message {output_last_message_path_quoted}"
+    )
+    executor = CodexExecutor(settings)
+
+    now = datetime.now(UTC)
+    job = Job(
+        id=7,
+        status=JobStatus.RUNNING,
+        mode=JobMode.SESSION,
+        prompt="hello from session",
+        created_at=now,
+        updated_at=now,
+        risk_level=RiskLevel.LOW,
+        needs_approval=False,
+        session_name="feature-branch",
+    )
+    ctx = ExecutionContext(job=job, run_dir=tmp_path / "run", approved=True)
+    output_path = tmp_path / "run" / "assistant_last_message.txt"
+
+    plan = executor.build_plan(ctx, output_last_message_path=output_path)
+
+    assert str(output_path) in plan.command
+    assert _count_output_last_message_flags(plan.command) == 1
 
 
 def test_auto_safe_flags_can_disable_skip_git_repo_check(tmp_path: Path) -> None:

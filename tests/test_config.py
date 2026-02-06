@@ -42,6 +42,7 @@ def test_load_settings_from_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path: 
 
     assert settings.telegram_bot_token == "token"
     assert settings.owner_telegram_id == 123
+    assert settings.telegram_business_connection_id is None
     assert settings.sqlite_path == (tmp_path / "data/test.sqlite3").resolve()
     assert settings.runs_dir == (tmp_path / "runs-test").resolve()
     assert settings.codex_workdir == tmp_path.resolve()
@@ -66,3 +67,14 @@ def test_default_session_template_uses_resume(monkeypatch: pytest.MonkeyPatch, t
         settings.codex_session_cmd_template
         == "codex exec --skip-git-repo-check resume {session_name_quoted} {prompt_quoted}"
     )
+
+
+def test_business_connection_id_loaded_when_set(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("OWNER_TELEGRAM_ID", "123")
+    monkeypatch.setenv("TELEGRAM_BUSINESS_CONNECTION_ID", "bc-123")
+
+    settings = load_settings()
+
+    assert settings.telegram_business_connection_id == "bc-123"

@@ -12,8 +12,22 @@ from pathlib import Path
 
 from aiogram import Bot, Dispatcher, Router
 from aiogram.filters import Command
-from aiogram.types import FSInputFile, Message
+from aiogram.types import FSInputFile, Message, PollAnswer
 
+from .approval_checklists import (
+    APPROVAL_TASK_APPROVE,
+    APPROVAL_TASK_REJECT,
+    APPROVAL_TASK_REVISE,
+    ApprovalChecklist,
+    ApprovalChecklistStore,
+)
+from .approval_polls import (
+    APPROVAL_OPTION_APPROVE,
+    APPROVAL_OPTION_REJECT,
+    APPROVAL_OPTION_REVISE,
+    ApprovalPoll,
+    ApprovalPollStore,
+)
 from .executor import RuntimeProfileError
 from .models import JobMode, JobStatus
 from .orchestrator import Orchestrator
@@ -50,8 +64,8 @@ Commands:
 /jobs - list latest jobs
 /job <job_id> - concise job status
 /info <job_id> - full diagnostics (workdir/logs/events/artifacts)
-/approve <job_id> - approve a waiting job
-/reject <job_id> - reject a waiting job
+/approve <job_id> - approve a waiting job (poll/checklist fallback)
+/reject <job_id> - reject a waiting job (poll/checklist fallback)
 /cancel <job_id> - cancel queued or running job
 /video <job_id> - generate and send recap video
 """.strip()
@@ -285,16 +299,39 @@ def build_dispatcher(
     owner_user_id: int,
     command_cooldown_seconds: float,
     runs_dir: Path,
+    approval_polls: ApprovalPollStore | None = None,
+    approval_checklists: ApprovalChecklistStore | None = None,
 ) -> Dispatcher:
     dispatcher = Dispatcher()
     router = Router()
     chat_agents: dict[int, str] = {}
+    active_approval_polls = approval_polls or ApprovalPollStore()
+    active_approval_checklists = approval_checklists or ApprovalChecklistStore()
     guard = CommandGuard(
         BotContext(
             owner_user_id=owner_user_id,
             command_cooldown_seconds=command_cooldown_seconds,
         )
     )
+
+    async def _close_approval_poll(poll: ApprovalPoll) -> None:
+        try:
+            await bot.stop_poll(chat_id=poll.chat_id, message_id=poll.message_id)
+        except Exception:
+            return
+
+    async def _close_approval_poll_for_job(job_id: int) -> None:
+        poll = active_approval_polls.pop_for_job(job_id)
+        if poll is None:
+            return
+        await _close_approval_poll(poll)
+
+    def _drop_approval_checklist_for_job(job_id: int) -> ApprovalChecklist | None:
+        return active_approval_checklists.pop_for_job(job_id)
+
+    async def _clear_approval_ui_for_job(job_id: int) -> None:
+        _drop_approval_checklist_for_job(job_id)
+        await _close_approval_poll_for_job(job_id)
 
     @router.message(Command("start"))
     async def start_handler(message: Message) -> None:
@@ -986,6 +1023,7 @@ def build_dispatcher(
         if job.status != JobStatus.QUEUED:
             await message.answer(f"Job {job_id} was not awaiting approval (status={job.status})")
             return
+        await _clear_approval_ui_for_job(job_id)
         await message.answer(f"Approved job {job_id}; it is queued")
 
     @router.message(Command("reject"))
@@ -1003,7 +1041,132 @@ def build_dispatcher(
         except KeyError:
             await message.answer(f"Job {job_id} not found")
             return
+        await _clear_approval_ui_for_job(job_id)
         await message.answer(f"Rejected job {job.id}; status={job.status}")
+
+    @router.poll_answer()
+    async def poll_approval_handler(answer: PollAnswer) -> None:
+        user = answer.user
+        if user is None or user.id != owner_user_id:
+            return
+        poll = active_approval_polls.get(answer.poll_id)
+        if poll is None or not answer.option_ids:
+            return
+        selected = int(answer.option_ids[0])
+        if selected not in {APPROVAL_OPTION_APPROVE, APPROVAL_OPTION_REJECT, APPROVAL_OPTION_REVISE}:
+            return
+        active_approval_polls.pop(answer.poll_id)
+
+        if selected == APPROVAL_OPTION_APPROVE:
+            try:
+                job = await orchestrator.approve_job(poll.job_id, user.id)
+            except KeyError:
+                await bot.send_message(chat_id=owner_user_id, text=f"Job {poll.job_id} not found")
+                return
+            finally:
+                _drop_approval_checklist_for_job(poll.job_id)
+                await _close_approval_poll(poll)
+            if job.status != JobStatus.QUEUED:
+                await bot.send_message(
+                    chat_id=owner_user_id,
+                    text=f"Job {poll.job_id} was not awaiting approval (status={job.status})",
+                )
+                return
+            await bot.send_message(chat_id=owner_user_id, text=f"Approved job {poll.job_id}; it is queued")
+            return
+
+        try:
+            job = await orchestrator.reject_job(poll.job_id, user.id)
+        except KeyError:
+            await bot.send_message(chat_id=owner_user_id, text=f"Job {poll.job_id} not found")
+            return
+        finally:
+            _drop_approval_checklist_for_job(poll.job_id)
+            await _close_approval_poll(poll)
+        if job.status != JobStatus.REJECTED:
+            await bot.send_message(
+                chat_id=owner_user_id,
+                text=f"Job {poll.job_id} was not awaiting approval (status={job.status})",
+            )
+            return
+        if selected == APPROVAL_OPTION_REJECT:
+            await bot.send_message(chat_id=owner_user_id, text=f"Rejected job {poll.job_id}; status={job.status}")
+            return
+        await bot.send_message(
+            chat_id=owner_user_id,
+            text=f"Job {poll.job_id} marked rejected. Send a revised prompt with /run when ready.",
+        )
+
+    async def _handle_checklist_approval_message(message: Message) -> bool:
+        event = message.checklist_tasks_done
+        if event is None:
+            return False
+        user = message.from_user
+        if user is None or user.id != owner_user_id:
+            return False
+        checklist_message = event.checklist_message
+        if checklist_message is None or checklist_message.chat is None:
+            return False
+
+        tracked = active_approval_checklists.get(
+            int(checklist_message.chat.id),
+            int(checklist_message.message_id),
+        )
+        if tracked is None:
+            return False
+
+        done_task_ids = {int(task_id) for task_id in (event.marked_as_done_task_ids or [])}
+        if not done_task_ids:
+            return False
+
+        action: str | None = None
+        if tracked.approve_task_id in done_task_ids:
+            action = "approve"
+        elif tracked.reject_task_id in done_task_ids:
+            action = "reject"
+        elif tracked.revise_task_id in done_task_ids:
+            action = "revise"
+        if action is None:
+            return False
+
+        active_approval_checklists.pop(tracked.chat_id, tracked.message_id)
+
+        if action == "approve":
+            try:
+                job = await orchestrator.approve_job(tracked.job_id, user.id)
+            except KeyError:
+                await bot.send_message(chat_id=owner_user_id, text=f"Job {tracked.job_id} not found")
+                return True
+            await _close_approval_poll_for_job(tracked.job_id)
+            if job.status != JobStatus.QUEUED:
+                await bot.send_message(
+                    chat_id=owner_user_id,
+                    text=f"Job {tracked.job_id} was not awaiting approval (status={job.status})",
+                )
+                return True
+            await bot.send_message(chat_id=owner_user_id, text=f"Approved job {tracked.job_id}; it is queued")
+            return True
+
+        try:
+            job = await orchestrator.reject_job(tracked.job_id, user.id)
+        except KeyError:
+            await bot.send_message(chat_id=owner_user_id, text=f"Job {tracked.job_id} not found")
+            return True
+        await _close_approval_poll_for_job(tracked.job_id)
+        if job.status != JobStatus.REJECTED:
+            await bot.send_message(
+                chat_id=owner_user_id,
+                text=f"Job {tracked.job_id} was not awaiting approval (status={job.status})",
+            )
+            return True
+        if action == "reject":
+            await bot.send_message(chat_id=owner_user_id, text=f"Rejected job {tracked.job_id}; status={job.status}")
+            return True
+        await bot.send_message(
+            chat_id=owner_user_id,
+            text=f"Job {tracked.job_id} marked rejected. Send a revised prompt with /run when ready.",
+        )
+        return True
 
     @router.message(Command("cancel"))
     async def cancel_handler(message: Message) -> None:
@@ -1018,6 +1181,8 @@ def build_dispatcher(
         except KeyError:
             await message.answer(f"Job {job_id} not found")
             return
+        if job.status in {JobStatus.CANCELED, JobStatus.REJECTED, JobStatus.QUEUED, JobStatus.RUNNING}:
+            await _clear_approval_ui_for_job(job_id)
         await message.answer(f"Cancel requested for job {job.id}; status={job.status}")
 
     @router.message(Command("video"))
@@ -1112,6 +1277,11 @@ def build_dispatcher(
     @router.message()
     async def fallback_handler(message: Message) -> None:
         if not await guard.authorize(message):
+            return
+        if message.checklist_tasks_done is not None:
+            await _handle_checklist_approval_message(message)
+            return
+        if message.checklist_tasks_added is not None:
             return
         await message.answer("Unknown command. Use /start for help.")
 
