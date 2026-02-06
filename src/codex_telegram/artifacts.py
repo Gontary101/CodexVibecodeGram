@@ -26,6 +26,7 @@ def _kind_for_extension(ext: str) -> str:
 class ArtifactService:
     _PATH_IN_BACKTICKS = re.compile(r"`([^`\n]+)`")
     _PATH_GENERIC = re.compile(r"(?<![\w/])([~./]?[A-Za-z0-9_\-./]+?\.[A-Za-z0-9]{1,10})(?![\w])")
+    _TELEGRAM_UPLOAD_DIR = ".codex_telegram_uploads"
 
     def __init__(self, repo: Repository, settings: Settings) -> None:
         self._repo = repo
@@ -38,20 +39,27 @@ class ArtifactService:
                 digest.update(chunk)
         return digest.hexdigest()
 
+    @classmethod
+    def _is_runtime_upload(cls, path: Path) -> bool:
+        return cls._TELEGRAM_UPLOAD_DIR in path.parts
+
     def register_file(self, job_id: int, path: Path, kind: str | None = None) -> Artifact | None:
-        if not path.exists() or not path.is_file():
+        resolved = path.resolve()
+        if not resolved.exists() or not resolved.is_file():
             return None
-        ext = path.suffix.lower()
-        if ext and ext not in self._settings.allowed_artifact_extensions:
+        if self._is_runtime_upload(resolved):
             return None
-        size = path.stat().st_size
+        ext = resolved.suffix.lower()
+        if ext not in self._settings.allowed_artifact_extensions:
+            return None
+        size = resolved.stat().st_size
         if size == 0:
             return None
         if size > self._settings.max_artifact_bytes:
             return None
-        sha256 = self._sha256(path)
+        sha256 = self._sha256(resolved)
         artifact_kind = kind or _kind_for_extension(ext)
-        return self._repo.add_artifact(job_id, artifact_kind, path.resolve(), size, sha256)
+        return self._repo.add_artifact(job_id, artifact_kind, resolved, size, sha256)
 
     def collect_from_run_dir(self, job_id: int, run_dir: Path) -> list[Artifact]:
         artifacts: list[Artifact] = []
@@ -91,6 +99,8 @@ class ArtifactService:
         raw = Path(candidate).expanduser()
         resolved = (base_dir / raw).resolve() if not raw.is_absolute() else raw.resolve()
         if not resolved.exists() or not resolved.is_file():
+            return None
+        if self._is_runtime_upload(resolved):
             return None
         if not self._is_under_any_root(resolved, roots):
             return None

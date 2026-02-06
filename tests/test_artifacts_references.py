@@ -103,3 +103,32 @@ def test_collect_from_output_texts_ignores_outside_root(tmp_path: Path) -> None:
         outside.unlink(missing_ok=True)
 
     assert added == []
+
+
+def test_collect_from_output_texts_ignores_telegram_upload_cache(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    db = Database(settings.sqlite_path)
+    db.init_schema()
+    repo = Repository(db)
+    svc = ArtifactService(repo, settings)
+
+    job = repo.create_job(
+        prompt="test",
+        mode=JobMode.EPHEMERAL,
+        session_name=None,
+        risk_level=RiskLevel.LOW,
+        needs_approval=False,
+    )
+
+    cached = tmp_path / ".codex_telegram_uploads" / "chat-1" / "message-2" / "photo.jpg"
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cached.write_bytes(b"jpg")
+
+    added = svc.collect_from_output_texts(
+        job.id,
+        [f"Output: `{cached}`"],
+        base_dir=tmp_path,
+        roots=[tmp_path],
+    )
+
+    assert added == []

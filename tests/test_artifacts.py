@@ -76,3 +76,48 @@ def test_register_file_keeps_non_empty_file(tmp_path: Path) -> None:
 
     assert artifact is not None
     assert artifact.size_bytes > 0
+
+
+def test_register_file_skips_missing_extension(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    db = Database(settings.sqlite_path)
+    db.init_schema()
+    repo = Repository(db)
+    svc = ArtifactService(repo, settings)
+    job = repo.create_job(
+        prompt="test",
+        mode=JobMode.EPHEMERAL,
+        session_name=None,
+        risk_level=RiskLevel.LOW,
+        needs_approval=False,
+    )
+
+    file_path = tmp_path / ".gitignore"
+    file_path.write_text("*.tmp\n", encoding="utf-8")
+
+    artifact = svc.register_file(job_id=job.id, path=file_path)
+
+    assert artifact is None
+
+
+def test_register_file_skips_runtime_upload_cache(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    db = Database(settings.sqlite_path)
+    db.init_schema()
+    repo = Repository(db)
+    svc = ArtifactService(repo, settings)
+    job = repo.create_job(
+        prompt="test",
+        mode=JobMode.EPHEMERAL,
+        session_name=None,
+        risk_level=RiskLevel.LOW,
+        needs_approval=False,
+    )
+
+    file_path = tmp_path / ".codex_telegram_uploads" / "chat-1" / "message-2" / "photo.jpg"
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_bytes(b"jpg")
+
+    artifact = svc.register_file(job_id=job.id, path=file_path)
+
+    assert artifact is None
