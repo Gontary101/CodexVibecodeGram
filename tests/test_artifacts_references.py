@@ -19,6 +19,8 @@ def _settings(tmp_path: Path) -> Settings:
         codex_session_cmd_template="echo",
         codex_session_boot_cmd_template=None,
         codex_skip_git_repo_check=True,
+        codex_auto_safe_flags=True,
+        codex_safe_default_approval="on-request",
         worker_poll_interval=0.1,
         max_parallel_jobs=1,
         job_timeout_seconds=60,
@@ -36,6 +38,7 @@ def _settings(tmp_path: Path) -> Settings:
             ".mp4",
             ".pdf",
         ),
+        telegram_response_mode="natural",
         log_level="INFO",
     )
 

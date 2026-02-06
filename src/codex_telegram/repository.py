@@ -336,3 +336,25 @@ class Repository:
             "UPDATE sessions SET last_seen_at=? WHERE name=?",
             (now, name),
         )
+
+    def get_active_session_for_chat(self, chat_id: int) -> str | None:
+        row = self._db.query_one(
+            "SELECT active_session_name FROM chat_state WHERE chat_id=?",
+            (chat_id,),
+        )
+        if row is None:
+            return None
+        return row["active_session_name"]
+
+    def set_active_session_for_chat(self, chat_id: int, session_name: str | None) -> None:
+        now = _now_iso()
+        self._db.execute(
+            """
+            INSERT INTO chat_state(chat_id, active_session_name, updated_at)
+            VALUES(?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+              active_session_name=excluded.active_session_name,
+              updated_at=excluded.updated_at
+            """,
+            (chat_id, session_name, now),
+        )

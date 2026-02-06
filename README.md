@@ -9,7 +9,7 @@ Run Codex tasks from Telegram, track jobs in a queue, and receive results (text 
 - Adds approval gates for risky prompts
 - Persists job state in SQLite
 - Sends natural output replies plus non-log artifacts (images/video/docs)
-- Supports session resume mode (`codex exec resume ...`)
+- Supports per-chat active sessions with resume/fork workflows (`codex exec resume ...`)
 
 ## Repository Layout
 
@@ -93,17 +93,29 @@ See `.env.example` for full list. Most important settings:
   Comma-separated allowlist roots used by `/workdir set ...` (default: `CODEX_WORKDIR`)
 - `CODEX_SKIP_GIT_REPO_CHECK=true`:
   Injects `--skip-git-repo-check` into `codex exec` commands
+- `CODEX_AUTO_SAFE_FLAGS=true`:
+  Enables automatic safe runtime flags (like trusted-directory bypass when configured)
+- `CODEX_SAFE_DEFAULT_APPROVAL=on-request`:
+  Default approval policy when runtime override is not set
 - `CODEX_EPHEMERAL_CMD_TEMPLATE`:
   Template for `/run`
 - `CODEX_SESSION_CMD_TEMPLATE`:
   Template for `/run_session` (default uses `codex exec resume ...`)
+- `TELEGRAM_RESPONSE_MODE=natural|compact|verbose`:
+  Controls Telegram output verbosity (default is natural answer-only)
 
 ## Telegram Commands
 
 ### Task Commands
 
 - `/run <prompt>`
-- `/run_session <session_id> <prompt>`
+- `/run_session <session_id> <prompt>` (explicit session)
+- `/new [name]` (create + activate session for this chat)
+- `/resume <session_id_or_name>` (activate/resume for this chat)
+- `/fork [source_session]` (create derived session + activate)
+- `/session [list|create|stop|use|clear] [name]`
+- `/mention <path> <prompt>` (run with file-context hint)
+- `/init [extra instructions]` (queue AGENTS.md scaffold task)
 - `/review [scope]`
 - `/diff [scope]`
 - `/plan <task>`
@@ -118,6 +130,7 @@ See `.env.example` for full list. Most important settings:
 - `/workdir [show|set <path>|reset]`
 - `/experimental [list|clear|on <feature>|off <feature>]`
 - `/personality [friendly|pragmatic|none|custom <instruction>]`
+- `/agent [list|switch <name>|reset]`
 - `/status`
 - `/compact`
 
@@ -129,10 +142,7 @@ See `.env.example` for full list. Most important settings:
 - `/approve <job_id>`
 - `/reject <job_id>`
 - `/cancel <job_id>`
-- `/session` (same as list)
-- `/session create <name>`
-- `/session stop <name>`
-- `/session list`
+- `/session [list|create|stop|use|clear] [name]`
 - `/mcp [list|get <name>]`
 - `/debug-config`
 

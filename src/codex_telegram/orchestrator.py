@@ -124,6 +124,9 @@ class Orchestrator:
     def set_approvals(self, policy: str | None) -> RuntimeProfile:
         return self._executor.set_approval_policy(policy)
 
+    def get_effective_approval_policy(self) -> str:
+        return self._executor.get_effective_approval_policy()
+
     def set_search(self, enabled: bool) -> RuntimeProfile:
         return self._executor.set_search(enabled)
 
@@ -138,6 +141,12 @@ class Orchestrator:
 
     def set_workdir(self, path_value: str | None):
         return self._executor.set_workdir(path_value)
+
+    def get_active_session_for_chat(self, chat_id: int) -> str | None:
+        return self._repo.get_active_session_for_chat(chat_id)
+
+    def set_active_session_for_chat(self, chat_id: int, session_name: str | None) -> None:
+        self._repo.set_active_session_for_chat(chat_id, session_name)
 
     def set_personality(self, personality: str, custom_instruction: str | None = None) -> RuntimeProfile:
         return self._executor.set_personality(personality, custom_instruction)

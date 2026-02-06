@@ -56,12 +56,15 @@ async def test_orchestrator_runs_low_risk_job(tmp_path: Path) -> None:
         codex_session_cmd_template="echo",
         codex_session_boot_cmd_template=None,
         codex_skip_git_repo_check=True,
+        codex_auto_safe_flags=True,
+        codex_safe_default_approval="on-request",
         worker_poll_interval=0.05,
         max_parallel_jobs=1,
         job_timeout_seconds=10,
         command_cooldown_seconds=0.0,
         max_artifact_bytes=5_000_000,
         allowed_artifact_extensions=(".log", ".txt", ".json", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".pdf"),
+        telegram_response_mode="natural",
         log_level="INFO",
     )
     db = Database(settings.sqlite_path)
@@ -109,12 +112,15 @@ async def test_orchestrator_waits_for_approval(tmp_path: Path) -> None:
         codex_session_cmd_template="echo",
         codex_session_boot_cmd_template=None,
         codex_skip_git_repo_check=True,
+        codex_auto_safe_flags=True,
+        codex_safe_default_approval="on-request",
         worker_poll_interval=0.05,
         max_parallel_jobs=1,
         job_timeout_seconds=10,
         command_cooldown_seconds=0.0,
         max_artifact_bytes=5_000_000,
         allowed_artifact_extensions=(".log", ".txt", ".json", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".pdf"),
+        telegram_response_mode="natural",
         log_level="INFO",
     )
     db = Database(settings.sqlite_path)

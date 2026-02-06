@@ -21,6 +21,8 @@ DEFAULT_ALLOWED_EXTENSIONS = (
     ".mp4",
     ".pdf",
 )
+ALLOWED_RESPONSE_MODES = {"natural", "compact", "verbose"}
+ALLOWED_APPROVAL_POLICIES = {"untrusted", "on-failure", "on-request", "never"}
 
 
 @dataclass(slots=True)
@@ -35,12 +37,15 @@ class Settings:
     codex_session_cmd_template: str
     codex_session_boot_cmd_template: str | None
     codex_skip_git_repo_check: bool
+    codex_auto_safe_flags: bool
+    codex_safe_default_approval: str
     worker_poll_interval: float
     max_parallel_jobs: int
     job_timeout_seconds: int
     command_cooldown_seconds: float
     max_artifact_bytes: int
     allowed_artifact_extensions: tuple[str, ...]
+    telegram_response_mode: str
     log_level: str
 
 
@@ -115,6 +120,14 @@ def _get_extensions() -> tuple[str, ...]:
     return parsed or DEFAULT_ALLOWED_EXTENSIONS
 
 
+def _get_choice(name: str, default: str, allowed: set[str]) -> str:
+    value = os.getenv(name, default).strip().lower()
+    if value not in allowed:
+        allowed_values = ", ".join(sorted(allowed))
+        raise ConfigError(f"Invalid value for {name}: {value}. Allowed: {allowed_values}")
+    return value
+
+
 def load_settings() -> Settings:
     _load_env_file(Path(".env"))
 
@@ -147,12 +160,19 @@ def load_settings() -> Settings:
         ),
         codex_session_boot_cmd_template=os.getenv("CODEX_SESSION_BOOT_CMD_TEMPLATE"),
         codex_skip_git_repo_check=_get_bool("CODEX_SKIP_GIT_REPO_CHECK", True),
+        codex_auto_safe_flags=_get_bool("CODEX_AUTO_SAFE_FLAGS", True),
+        codex_safe_default_approval=_get_choice(
+            "CODEX_SAFE_DEFAULT_APPROVAL",
+            "on-request",
+            ALLOWED_APPROVAL_POLICIES,
+        ),
         worker_poll_interval=_get_float("WORKER_POLL_INTERVAL", 0.5),
         max_parallel_jobs=_get_int("MAX_PARALLEL_JOBS", 1),
         job_timeout_seconds=_get_int("JOB_TIMEOUT_SECONDS", 3600),
         command_cooldown_seconds=_get_float("COMMAND_COOLDOWN_SECONDS", 1.0),
         max_artifact_bytes=_get_int("MAX_ARTIFACT_BYTES", 50_000_000),
         allowed_artifact_extensions=_get_extensions(),
+        telegram_response_mode=_get_choice("TELEGRAM_RESPONSE_MODE", "natural", ALLOWED_RESPONSE_MODES),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
     )
 

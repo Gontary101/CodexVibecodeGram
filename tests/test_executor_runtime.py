@@ -20,12 +20,15 @@ def _settings(tmp_path: Path) -> Settings:
         codex_session_cmd_template="codex exec --skip-git-repo-check resume {session_name_quoted} {prompt_quoted}",
         codex_session_boot_cmd_template=None,
         codex_skip_git_repo_check=True,
+        codex_auto_safe_flags=True,
+        codex_safe_default_approval="on-request",
         worker_poll_interval=0.1,
         max_parallel_jobs=1,
         job_timeout_seconds=60,
         command_cooldown_seconds=0.0,
         max_artifact_bytes=1_000_000,
         allowed_artifact_extensions=(".log", ".txt", ".json", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".pdf"),
+        telegram_response_mode="natural",
         log_level="INFO",
     )
 
@@ -123,3 +126,24 @@ def test_set_workdir_reset_restores_default(tmp_path: Path) -> None:
 
     executor.set_workdir(None)
     assert executor.get_effective_workdir() == allowed_root.resolve()
+
+
+def test_default_approval_and_output_path_are_injected(tmp_path: Path) -> None:
+    executor = CodexExecutor(_settings(tmp_path))
+
+    output_path = tmp_path / "run" / "assistant_last_message.txt"
+    plan = executor.build_plan(_ctx(tmp_path, "hello"), output_last_message_path=output_path)
+
+    assert "approval_policy=\"on-request\"" in plan.command
+    assert "--output-last-message" in plan.command or " -o " in plan.command
+    assert str(output_path) in plan.command
+
+
+def test_auto_safe_flags_can_disable_skip_git_repo_check(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    settings.codex_auto_safe_flags = False
+    executor = CodexExecutor(settings)
+
+    plan = executor.build_plan(_ctx(tmp_path, "hello"))
+
+    assert "--skip-git-repo-check" not in plan.command

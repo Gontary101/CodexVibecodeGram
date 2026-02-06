@@ -68,6 +68,12 @@ CREATE TABLE IF NOT EXISTS sessions (
   last_seen_at TEXT,
   metadata_json TEXT
 );
+
+CREATE TABLE IF NOT EXISTS chat_state (
+  chat_id INTEGER PRIMARY KEY,
+  active_session_name TEXT,
+  updated_at TEXT NOT NULL
+);
 """
 
 
