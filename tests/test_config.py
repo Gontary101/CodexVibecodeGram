@@ -16,6 +16,20 @@ def test_load_settings_requires_mandatory_env(monkeypatch: pytest.MonkeyPatch, t
 
 def test_load_settings_from_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
+    for key in (
+        "TELEGRAM_BOT_TOKEN",
+        "OWNER_TELEGRAM_ID",
+        "SQLITE_PATH",
+        "RUNS_DIR",
+        "CODEX_WORKDIR",
+        "CODEX_ALLOWED_WORKDIRS",
+        "CODEX_SKIP_GIT_REPO_CHECK",
+        "CODEX_AUTO_SAFE_FLAGS",
+        "CODEX_SAFE_DEFAULT_APPROVAL",
+        "TELEGRAM_RESPONSE_MODE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
     (tmp_path / ".env").write_text(
         "TELEGRAM_BOT_TOKEN=token\n"
         "OWNER_TELEGRAM_ID=123\n"
