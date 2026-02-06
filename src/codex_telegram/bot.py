@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import mimetypes
+import os
 import re
 import shlex
 import subprocess
 import time
+import tomllib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,6 +31,7 @@ from .approval_polls import (
     ApprovalPoll,
     ApprovalPollStore,
 )
+from .assistant_polls import AssistantPoll, AssistantPollStore
 from .executor import RuntimeProfileError
 from .models import JobMode, JobStatus
 from .orchestrator import Orchestrator
@@ -39,6 +43,7 @@ HELP_TEXT = """
 Commands:
 /start - show this help
 /run <prompt> - enqueue a job (uses active session when set)
+send file or image (optional caption or /run caption) - enqueue attachment-aware job
 /run_session <session_name> <prompt> - enqueue a job in explicit session mode
 /new [name] - create a session and set it as active for this chat
 /resume <session_name_or_id> - activate/resume a session for this chat
@@ -75,6 +80,12 @@ Commands:
 class BotContext:
     owner_user_id: int
     command_cooldown_seconds: float
+
+
+@dataclass(slots=True)
+class _IncomingAttachment:
+    kind: str
+    path: Path
 
 
 class CommandGuard:
@@ -176,13 +187,101 @@ def _parse_model_payload(payload: str) -> tuple[str, str | None, str | None]:
     return ("set", model, reasoning)
 
 
+def _codex_config_path() -> Path:
+    codex_home = os.getenv("CODEX_HOME", "").strip()
+    if codex_home:
+        return Path(codex_home).expanduser() / "config.toml"
+    return Path.home() / ".codex" / "config.toml"
+
+
+def _load_codex_runtime_defaults() -> dict[str, str]:
+    path = _codex_config_path()
+    if not path.exists() or not path.is_file():
+        return {}
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    profile_overrides: dict[str, object] = {}
+    profile_name = os.getenv("CODEX_PROFILE", "").strip()
+    if profile_name:
+        profiles = data.get("profiles")
+        if isinstance(profiles, dict):
+            selected = profiles.get(profile_name)
+            if isinstance(selected, dict):
+                profile_overrides = selected
+
+    def _from_config(*keys: str) -> str | None:
+        for key in keys:
+            value: object | None
+            if key in profile_overrides:
+                value = profile_overrides.get(key)
+            else:
+                value = data.get(key)
+            if isinstance(value, bool):
+                if key == "web_search":
+                    return "live" if value else "disabled"
+                return "true" if value else "false"
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return None
+
+    model = _from_config("model")
+    reasoning = _from_config("model_reasoning_effort")
+    sandbox_mode = _from_config("sandbox_mode", "sandbox")
+    approval_policy = _from_config("approval_policy", "ask_for_approval")
+    web_search = _from_config("web_search")
+    out: dict[str, str] = {}
+    if model:
+        out["model"] = model
+    if reasoning:
+        out["reasoning_effort"] = reasoning
+    if sandbox_mode:
+        out["sandbox_mode"] = sandbox_mode
+    if approval_policy:
+        out["approval_policy"] = approval_policy
+    if web_search:
+        out["web_search"] = web_search
+    return out
+
+
+def _render_runtime_value(
+    current: str | None,
+    configured: str | None,
+    *,
+    unknown_text: str,
+) -> str:
+    if current:
+        return current
+    if configured:
+        return f"{configured} (from Codex config)"
+    return unknown_text
+
+
 def _model_help_text(orchestrator: Orchestrator) -> str:
     profile = orchestrator.get_runtime_profile()
+    defaults = _load_codex_runtime_defaults()
     return "\n".join(
         [
             "Model settings:",
-            f"current_model={profile.model or '(default)'}",
-            f"current_reasoning_effort={profile.reasoning_effort or '(default)'}",
+            "current_model="
+            + _render_runtime_value(
+                profile.model,
+                defaults.get("model"),
+                unknown_text="unknown (set explicitly with /model <name>)",
+            ),
+            "current_reasoning_effort="
+            + _render_runtime_value(
+                profile.reasoning_effort,
+                defaults.get("reasoning_effort"),
+                unknown_text="auto (provider-managed)",
+            ),
             "",
             "Usage:",
             "/model",
@@ -263,16 +362,42 @@ def _render_experimental_status(orchestrator: Orchestrator, catalog: list[tuple[
 
 def _format_runtime(orchestrator: Orchestrator) -> str:
     profile = orchestrator.get_runtime_profile()
+    defaults = _load_codex_runtime_defaults()
     effective_approvals = orchestrator.get_effective_approval_policy()
     allowed_roots = ", ".join(str(p) for p in orchestrator.get_allowed_workdirs())
     return "\n".join(
         [
             "Runtime profile:",
-            f"model={profile.model or '(default)'}",
-            f"reasoning_effort={profile.reasoning_effort or '(default)'}",
-            f"permissions={profile.sandbox_mode or '(default)'}",
-            f"approvals={profile.approval_policy or f'(default:{effective_approvals})'}",
-            f"web_search={profile.web_search or '(default)'}",
+            "model="
+            + _render_runtime_value(
+                profile.model,
+                defaults.get("model"),
+                unknown_text="unknown (set explicitly with /model <name>)",
+            ),
+            "reasoning_effort="
+            + _render_runtime_value(
+                profile.reasoning_effort,
+                defaults.get("reasoning_effort"),
+                unknown_text="auto (provider-managed)",
+            ),
+            "permissions="
+            + _render_runtime_value(
+                profile.sandbox_mode,
+                defaults.get("sandbox_mode"),
+                unknown_text="Codex CLI internal value (not configured)",
+            ),
+            "approvals="
+            + _render_runtime_value(
+                profile.approval_policy,
+                defaults.get("approval_policy") or effective_approvals,
+                unknown_text=effective_approvals,
+            ),
+            "web_search="
+            + _render_runtime_value(
+                profile.web_search,
+                defaults.get("web_search"),
+                unknown_text="Codex CLI internal value (not configured)",
+            ),
             f"personality={profile.personality}",
             f"workdir={orchestrator.get_effective_workdir()}",
             f"allowed_workdirs={allowed_roots}",
@@ -291,6 +416,88 @@ def _tail_file(path: Path, max_chars: int = 2000) -> str:
     return text[-max_chars:].strip()
 
 
+def _has_supported_attachments(message: Message) -> bool:
+    return bool(message.document or message.photo)
+
+
+def _attachment_prompt_from_message(message: Message) -> str | None:
+    raw = (message.caption or message.text or "").strip()
+    if not raw:
+        return ""
+    lowered = raw.lower()
+    if not lowered.startswith("/"):
+        return raw
+    if lowered == "/run":
+        return ""
+    if lowered.startswith("/run "):
+        return raw[5:].strip()
+    return None
+
+
+def _sanitize_filename(value: str, fallback: str) -> str:
+    candidate = re.sub(r"[^a-zA-Z0-9._-]+", "-", value.strip()).strip("-")
+    return candidate or fallback
+
+
+def _unique_path(directory: Path, filename: str) -> Path:
+    base = Path(filename)
+    stem = base.stem or "upload"
+    suffix = base.suffix
+    candidate = directory / filename
+    idx = 1
+    while candidate.exists():
+        candidate = directory / f"{stem}-{idx}{suffix}"
+        idx += 1
+    return candidate
+
+
+async def _download_message_attachments(
+    message: Message,
+    bot: Bot,
+    workdir: Path,
+) -> list[_IncomingAttachment]:
+    upload_root = workdir / ".codex_telegram_uploads"
+    upload_dir = upload_root / f"chat-{_chat_id(message)}" / f"message-{int(message.message_id)}"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    attachments: list[_IncomingAttachment] = []
+
+    document = message.document
+    if document is not None:
+        file_name = (document.file_name or "").strip()
+        if not file_name:
+            ext = mimetypes.guess_extension(document.mime_type or "") or ""
+            file_name = f"document-{document.file_unique_id}{ext}"
+        safe_name = _sanitize_filename(file_name, f"document-{document.file_unique_id}")
+        target = _unique_path(upload_dir, safe_name)
+        await bot.download(document.file_id, destination=target)
+        kind = "image" if (document.mime_type or "").startswith("image/") else "file"
+        attachments.append(_IncomingAttachment(kind=kind, path=target))
+
+    if message.photo:
+        largest = message.photo[-1]
+        target = _unique_path(upload_dir, f"photo-{largest.file_unique_id}.jpg")
+        await bot.download(largest.file_id, destination=target)
+        attachments.append(_IncomingAttachment(kind="image", path=target))
+
+    return attachments
+
+
+def _build_attachment_prompt(user_prompt: str, attachments: list[_IncomingAttachment]) -> str:
+    lines = ["Telegram attachments saved in workspace:"]
+    for attachment in attachments:
+        lines.append(f"- {attachment.kind}: {attachment.path}")
+    lines.append("")
+    if user_prompt:
+        lines.append("User request:")
+        lines.append(user_prompt)
+    else:
+        lines.append(
+            "No extra user prompt was provided. Inspect these attachments, summarize what they contain, "
+            "and ask for clarification if the next action is ambiguous."
+        )
+    return "\n".join(lines)
+
+
 def build_dispatcher(
     bot: Bot,
     orchestrator: Orchestrator,
@@ -301,12 +508,14 @@ def build_dispatcher(
     runs_dir: Path,
     approval_polls: ApprovalPollStore | None = None,
     approval_checklists: ApprovalChecklistStore | None = None,
+    assistant_polls: AssistantPollStore | None = None,
 ) -> Dispatcher:
     dispatcher = Dispatcher()
     router = Router()
     chat_agents: dict[int, str] = {}
     active_approval_polls = approval_polls or ApprovalPollStore()
     active_approval_checklists = approval_checklists or ApprovalChecklistStore()
+    active_assistant_polls = assistant_polls or AssistantPollStore()
     guard = CommandGuard(
         BotContext(
             owner_user_id=owner_user_id,
@@ -315,6 +524,12 @@ def build_dispatcher(
     )
 
     async def _close_approval_poll(poll: ApprovalPoll) -> None:
+        try:
+            await bot.stop_poll(chat_id=poll.chat_id, message_id=poll.message_id)
+        except Exception:
+            return
+
+    async def _close_assistant_poll(poll: AssistantPoll) -> None:
         try:
             await bot.stop_poll(chat_id=poll.chat_id, message_id=poll.message_id)
         except Exception:
@@ -453,8 +668,8 @@ def build_dispatcher(
         chat_id = _chat_id(message)
         payload = _args(message).strip()
         if not payload or payload.lower() == "list":
-            active = chat_agents.get(chat_id, "default")
-            await message.answer(f"Agents:\n- default\nActive agent={active}\nUsage: /agent switch <name>")
+            active = chat_agents.get(chat_id) or "builtin"
+            await message.answer(f"Agents:\n- builtin\nActive agent={active}\nUsage: /agent switch <name>")
             return
         parts = _split_args(payload)
         action = parts[0].lower() if parts else ""
@@ -558,8 +773,20 @@ def build_dispatcher(
         action, model, reasoning = _parse_model_payload(payload)
         if action == "show":
             profile = orchestrator.get_runtime_profile()
+            defaults = _load_codex_runtime_defaults()
             await message.answer(
-                f"model={profile.model or '(default)'}\nreasoning_effort={profile.reasoning_effort or '(default)'}"
+                "model="
+                + _render_runtime_value(
+                    profile.model,
+                    defaults.get("model"),
+                    unknown_text="unknown (set explicitly with /model <name>)",
+                )
+                + "\nreasoning_effort="
+                + _render_runtime_value(
+                    profile.reasoning_effort,
+                    defaults.get("reasoning_effort"),
+                    unknown_text="auto (provider-managed)",
+                )
             )
             return
         if action == "help":
@@ -584,8 +811,21 @@ def build_dispatcher(
         except RuntimeProfileError as exc:
             await message.answer(str(exc))
             return
+        defaults = _load_codex_runtime_defaults()
         await message.answer(
-            f"Model updated.\nmodel={updated.model or '(default)'}\nreasoning_effort={updated.reasoning_effort or '(default)'}"
+            "Model updated.\n"
+            "model="
+            + _render_runtime_value(
+                updated.model,
+                defaults.get("model"),
+                unknown_text="unknown (set explicitly with /model <name>)",
+            )
+            + "\nreasoning_effort="
+            + _render_runtime_value(
+                updated.reasoning_effort,
+                defaults.get("reasoning_effort"),
+                unknown_text="auto (provider-managed)",
+            )
         )
 
     @router.message(Command("permissions"))
@@ -595,10 +835,20 @@ def build_dispatcher(
         payload = _args(message)
         if not payload:
             profile = orchestrator.get_runtime_profile()
+            defaults = _load_codex_runtime_defaults()
             await message.answer(
                 "permissions="
-                f"{profile.sandbox_mode or '(default)'}\n"
-                f"approvals={profile.approval_policy or f'(default:{orchestrator.get_effective_approval_policy()})'}"
+                + _render_runtime_value(
+                    profile.sandbox_mode,
+                    defaults.get("sandbox_mode"),
+                    unknown_text="Codex CLI internal value (not configured)",
+                )
+                + "\napprovals="
+                + _render_runtime_value(
+                    profile.approval_policy,
+                    defaults.get("approval_policy") or orchestrator.get_effective_approval_policy(),
+                    unknown_text=orchestrator.get_effective_approval_policy(),
+                )
             )
             return
         mode_arg = payload.strip().lower()
@@ -624,9 +874,20 @@ def build_dispatcher(
         except RuntimeProfileError as exc:
             await message.answer(str(exc))
             return
+        defaults = _load_codex_runtime_defaults()
         await message.answer(
-            f"Permissions updated: {updated.sandbox_mode or '(default)'}\n"
-            f"approvals={updated.approval_policy or f'(default:{orchestrator.get_effective_approval_policy()})'}"
+            "Permissions updated: "
+            + _render_runtime_value(
+                updated.sandbox_mode,
+                defaults.get("sandbox_mode"),
+                unknown_text="Codex CLI internal value (not configured)",
+            )
+            + "\napprovals="
+            + _render_runtime_value(
+                updated.approval_policy,
+                defaults.get("approval_policy") or orchestrator.get_effective_approval_policy(),
+                unknown_text=orchestrator.get_effective_approval_policy(),
+            )
         )
 
     @router.message(Command("approvals"))
@@ -636,8 +897,14 @@ def build_dispatcher(
         payload = _args(message)
         if not payload:
             profile = orchestrator.get_runtime_profile()
+            defaults = _load_codex_runtime_defaults()
             await message.answer(
-                f"approvals={profile.approval_policy or f'(default:{orchestrator.get_effective_approval_policy()})'}"
+                "approvals="
+                + _render_runtime_value(
+                    profile.approval_policy,
+                    defaults.get("approval_policy") or orchestrator.get_effective_approval_policy(),
+                    unknown_text=orchestrator.get_effective_approval_policy(),
+                )
             )
             return
         policy_arg = payload.strip().lower()
@@ -647,8 +914,14 @@ def build_dispatcher(
         except RuntimeProfileError as exc:
             await message.answer(str(exc))
             return
+        defaults = _load_codex_runtime_defaults()
         await message.answer(
-            f"Approvals updated: {updated.approval_policy or f'(default:{orchestrator.get_effective_approval_policy()})'}"
+            "Approvals updated: "
+            + _render_runtime_value(
+                updated.approval_policy,
+                defaults.get("approval_policy") or orchestrator.get_effective_approval_policy(),
+                unknown_text=orchestrator.get_effective_approval_policy(),
+            )
         )
 
     @router.message(Command("search"))
@@ -658,7 +931,15 @@ def build_dispatcher(
         payload = _args(message)
         if not payload:
             profile = orchestrator.get_runtime_profile()
-            await message.answer(f"web_search={profile.web_search or '(default)'}")
+            defaults = _load_codex_runtime_defaults()
+            await message.answer(
+                "web_search="
+                + _render_runtime_value(
+                    profile.web_search,
+                    defaults.get("web_search"),
+                    unknown_text="Codex CLI internal value (not configured)",
+                )
+            )
             return
         normalized = payload.strip().lower()
         if normalized in {"reset", "default"}:
@@ -667,7 +948,15 @@ def build_dispatcher(
             except RuntimeProfileError as exc:
                 await message.answer(str(exc))
                 return
-            await message.answer(f"Web search updated: {updated.web_search or '(default)'}")
+            defaults = _load_codex_runtime_defaults()
+            await message.answer(
+                "Web search updated: "
+                + _render_runtime_value(
+                    updated.web_search,
+                    defaults.get("web_search"),
+                    unknown_text="Codex CLI internal value (not configured)",
+                )
+            )
             return
         enabled = _parse_toggle(normalized)
         mode: str | None = None
@@ -683,7 +972,15 @@ def build_dispatcher(
         except RuntimeProfileError as exc:
             await message.answer(str(exc))
             return
-        await message.answer(f"Web search updated: {updated.web_search or '(default)'}")
+        defaults = _load_codex_runtime_defaults()
+        await message.answer(
+            "Web search updated: "
+            + _render_runtime_value(
+                updated.web_search,
+                defaults.get("web_search"),
+                unknown_text="Codex CLI internal value (not configured)",
+            )
+        )
 
     @router.message(Command("workdir"))
     async def workdir_handler(message: Message) -> None:
@@ -798,7 +1095,7 @@ def build_dispatcher(
         counts = orchestrator.count_jobs_by_status()
         lines = [_format_runtime(orchestrator), ""]
         lines.append(f"active_session_for_chat={orchestrator.get_active_session_for_chat(chat_id) or '(none)'}")
-        lines.append(f"active_agent_for_chat={chat_agents.get(chat_id, 'default')}")
+        lines.append(f"active_agent_for_chat={chat_agents.get(chat_id) or 'builtin'}")
         lines.append("")
         lines.append("Job counts:")
         for status in sorted(counts):
@@ -1049,52 +1346,93 @@ def build_dispatcher(
         user = answer.user
         if user is None or user.id != owner_user_id:
             return
-        poll = active_approval_polls.get(answer.poll_id)
-        if poll is None or not answer.option_ids:
-            return
-        selected = int(answer.option_ids[0])
-        if selected not in {APPROVAL_OPTION_APPROVE, APPROVAL_OPTION_REJECT, APPROVAL_OPTION_REVISE}:
-            return
-        active_approval_polls.pop(answer.poll_id)
+        approval_poll = active_approval_polls.get(answer.poll_id)
+        if approval_poll is not None:
+            if not answer.option_ids:
+                return
+            selected = int(answer.option_ids[0])
+            if selected not in {APPROVAL_OPTION_APPROVE, APPROVAL_OPTION_REJECT, APPROVAL_OPTION_REVISE}:
+                return
+            active_approval_polls.pop(answer.poll_id)
 
-        if selected == APPROVAL_OPTION_APPROVE:
+            if selected == APPROVAL_OPTION_APPROVE:
+                try:
+                    job = await orchestrator.approve_job(approval_poll.job_id, user.id)
+                except KeyError:
+                    await bot.send_message(chat_id=owner_user_id, text=f"Job {approval_poll.job_id} not found")
+                    return
+                finally:
+                    _drop_approval_checklist_for_job(approval_poll.job_id)
+                    await _close_approval_poll(approval_poll)
+                if job.status != JobStatus.QUEUED:
+                    await bot.send_message(
+                        chat_id=owner_user_id,
+                        text=f"Job {approval_poll.job_id} was not awaiting approval (status={job.status})",
+                    )
+                    return
+                await bot.send_message(chat_id=owner_user_id, text=f"Approved job {approval_poll.job_id}; it is queued")
+                return
+
             try:
-                job = await orchestrator.approve_job(poll.job_id, user.id)
+                job = await orchestrator.reject_job(approval_poll.job_id, user.id)
             except KeyError:
-                await bot.send_message(chat_id=owner_user_id, text=f"Job {poll.job_id} not found")
+                await bot.send_message(chat_id=owner_user_id, text=f"Job {approval_poll.job_id} not found")
                 return
             finally:
-                _drop_approval_checklist_for_job(poll.job_id)
-                await _close_approval_poll(poll)
-            if job.status != JobStatus.QUEUED:
+                _drop_approval_checklist_for_job(approval_poll.job_id)
+                await _close_approval_poll(approval_poll)
+            if job.status != JobStatus.REJECTED:
                 await bot.send_message(
                     chat_id=owner_user_id,
-                    text=f"Job {poll.job_id} was not awaiting approval (status={job.status})",
+                    text=f"Job {approval_poll.job_id} was not awaiting approval (status={job.status})",
                 )
                 return
-            await bot.send_message(chat_id=owner_user_id, text=f"Approved job {poll.job_id}; it is queued")
-            return
-
-        try:
-            job = await orchestrator.reject_job(poll.job_id, user.id)
-        except KeyError:
-            await bot.send_message(chat_id=owner_user_id, text=f"Job {poll.job_id} not found")
-            return
-        finally:
-            _drop_approval_checklist_for_job(poll.job_id)
-            await _close_approval_poll(poll)
-        if job.status != JobStatus.REJECTED:
+            if selected == APPROVAL_OPTION_REJECT:
+                await bot.send_message(chat_id=owner_user_id, text=f"Rejected job {approval_poll.job_id}; status={job.status}")
+                return
             await bot.send_message(
                 chat_id=owner_user_id,
-                text=f"Job {poll.job_id} was not awaiting approval (status={job.status})",
+                text=f"Job {approval_poll.job_id} marked rejected. Send a revised prompt with /run when ready.",
             )
             return
-        if selected == APPROVAL_OPTION_REJECT:
-            await bot.send_message(chat_id=owner_user_id, text=f"Rejected job {poll.job_id}; status={job.status}")
+
+        assistant_poll = active_assistant_polls.pop(answer.poll_id)
+        if assistant_poll is None or not answer.option_ids:
             return
+        await _close_assistant_poll(assistant_poll)
+        selected_options: list[str] = []
+        for raw_idx in answer.option_ids:
+            idx = int(raw_idx)
+            if 0 <= idx < len(assistant_poll.options):
+                selected_options.append(assistant_poll.options[idx])
+        if not selected_options:
+            await bot.send_message(chat_id=owner_user_id, text="Poll answer had no valid options.")
+            return
+        selected_text = ", ".join(selected_options)
+        followup_prompt = (
+            f"The user answered your poll for job {assistant_poll.source_job_id}.\n"
+            f"Question: {assistant_poll.question}\n"
+            f"Selected option(s): {selected_text}\n\n"
+            "Continue from this decision and perform the next concrete step."
+        )
+        chat_id = assistant_poll.chat_id
+        active_session = orchestrator.get_active_session_for_chat(chat_id)
+        if active_session and session_manager.is_session_active(active_session):
+            job = await orchestrator.submit_job(
+                prompt=followup_prompt,
+                mode=JobMode.SESSION,
+                session_name=active_session,
+            )
+            await bot.send_message(
+                chat_id=owner_user_id,
+                text=f"Poll response saved: {selected_text}\nQueued session follow-up job {job.id} in `{active_session}`.",
+            )
+            return
+
+        job = await orchestrator.submit_job(prompt=followup_prompt, mode=JobMode.EPHEMERAL)
         await bot.send_message(
             chat_id=owner_user_id,
-            text=f"Job {poll.job_id} marked rejected. Send a revised prompt with /run when ready.",
+            text=f"Poll response saved: {selected_text}\nQueued follow-up job {job.id}.",
         )
 
     async def _handle_checklist_approval_message(message: Message) -> bool:
@@ -1273,6 +1611,53 @@ def build_dispatcher(
             return
 
         await message.answer("Unknown session subcommand. Use create|stop|use|clear|list")
+
+    @router.message()
+    async def attachment_run_handler(message: Message) -> None:
+        if message.checklist_tasks_done is not None or message.checklist_tasks_added is not None:
+            return
+        if not _has_supported_attachments(message):
+            return
+        if not await guard.authorize(message):
+            return
+        prompt_input = _attachment_prompt_from_message(message)
+        if prompt_input is None:
+            await message.answer("Use a plain caption or `/run <prompt>` when sending attachments.")
+            return
+        workdir = orchestrator.get_effective_workdir()
+        try:
+            attachments = await _download_message_attachments(message=message, bot=bot, workdir=workdir)
+        except Exception as exc:
+            await message.answer(f"Failed to download attachment: {exc}")
+            return
+        if not attachments:
+            await message.answer("No supported attachment found. Send a file or image.")
+            return
+
+        prompt = _build_attachment_prompt(prompt_input, attachments)
+        chat_id = _chat_id(message)
+        agent_hint = chat_agents.get(chat_id)
+        effective_prompt = f"Use agent profile `{agent_hint}` for this response.\n\n{prompt}" if agent_hint else prompt
+        active_session = orchestrator.get_active_session_for_chat(chat_id)
+        if active_session:
+            if not session_manager.is_session_active(active_session):
+                await message.answer(
+                    f"Active session `{active_session}` is inactive. Use /resume {active_session} or /session clear."
+                )
+                return
+            job = await orchestrator.submit_job(
+                prompt=effective_prompt,
+                mode=JobMode.SESSION,
+                session_name=active_session,
+            )
+            await message.answer(
+                f"Queued session attachment job {job.id} in `{active_session}` ({job.status}) "
+                f"with {len(attachments)} attachment(s)."
+            )
+            return
+
+        job = await orchestrator.submit_job(prompt=effective_prompt, mode=JobMode.EPHEMERAL)
+        await message.answer(f"Queued attachment job {job.id} with status {job.status} ({len(attachments)} file(s)).")
 
     @router.message()
     async def fallback_handler(message: Message) -> None:

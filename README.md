@@ -8,6 +8,8 @@ Run Codex tasks from Telegram, track jobs in a queue, and receive results (text 
 - Queues Codex tasks and executes them on your server
 - Adds approval gates for risky prompts
 - Sends risky-job approvals as Telegram polls, or checklists when Business mode is configured
+- Accepts direct file/image uploads and injects them into Codex prompts
+- Can emit follow-up Telegram polls when Codex returns multiple-choice questions
 - Persists job state in SQLite
 - Sends natural output replies plus non-log artifacts (images/video/docs)
 - Supports per-chat active sessions with resume/fork workflows (`codex exec resume ...`)
@@ -113,6 +115,7 @@ See `.env.example` for full list. Most important settings:
 ### Task Commands
 
 - `/run <prompt>`
+- Send a file/image with optional caption (or `/run <prompt>` caption) to queue an attachment-aware job
 - `/run_session <session_id> <prompt>` (explicit session)
 - `/new [name]` (create + activate session for this chat)
 - `/resume <session_id_or_name>` (activate/resume for this chat)

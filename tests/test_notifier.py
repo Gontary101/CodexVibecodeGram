@@ -6,8 +6,9 @@ import pytest
 
 from codex_telegram.approval_checklists import ApprovalChecklistStore
 from codex_telegram.approval_polls import ApprovalPollStore
+from codex_telegram.assistant_polls import AssistantPollStore
 from codex_telegram.models import Artifact, Job, JobMode, JobStatus, RiskLevel
-from codex_telegram.notifier import TelegramNotifier
+from codex_telegram.notifier import TelegramNotifier, _extract_poll_candidate
 
 
 class FakeBot:
@@ -147,6 +148,64 @@ async def test_send_approval_request_falls_back_to_poll_when_checklist_fails() -
     poll = poll_store.get("poll-77")
     assert poll is not None
     assert checklist_store.get(123, 88) is None
+
+
+def test_extract_poll_candidate_from_multiple_choice_summary() -> None:
+    candidate = _extract_poll_candidate(
+        "Which direction should I take next?\n"
+        "1. Implement the API first\n"
+        "2. Write tests first\n"
+        "3. Refactor existing code first"
+    )
+
+    assert candidate is not None
+    assert candidate.question == "Which direction should I take next?"
+    assert candidate.options == (
+        "Implement the API first",
+        "Write tests first",
+        "Refactor existing code first",
+    )
+
+
+def test_extract_poll_candidate_from_explicit_poll_block() -> None:
+    candidate = _extract_poll_candidate(
+        "Plan is ready.\n"
+        "[poll]\n"
+        "Question: Which deployment mode should I run?\n"
+        "- Canary\n"
+        "- Blue/Green\n"
+        "[/poll]"
+    )
+
+    assert candidate is not None
+    assert candidate.question == "Which deployment mode should I run?"
+    assert candidate.options == ("Canary", "Blue/Green")
+
+
+@pytest.mark.asyncio
+async def test_success_notification_creates_follow_up_poll_for_multiple_choice_summary() -> None:
+    bot = FakeBot()
+    assistant_polls = AssistantPollStore()
+    notifier = TelegramNotifier(bot=bot, owner_chat_id=123, assistant_polls=assistant_polls)
+
+    await notifier.send_job_status(
+        _job(
+            JobStatus.SUCCEEDED,
+            summary=(
+                "Which implementation should I execute?\n"
+                "- Keep the current parser\n"
+                "- Replace it with a strict parser"
+            ),
+        ),
+        "Job completed",
+    )
+
+    assert bot.messages
+    assert len(bot.polls) == 1
+    poll = assistant_polls.get("poll-77")
+    assert poll is not None
+    assert poll.source_job_id == 7
+    assert poll.options == ("Keep the current parser", "Replace it with a strict parser")
 
 
 @pytest.mark.asyncio
