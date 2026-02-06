@@ -127,6 +127,7 @@ See `.env.example` for full list. Most important settings:
 - `/diff [scope]`
 - `/plan <task>`
 - `/poll [question | option1 | option2 ...]` (send a manual test poll)
+- `/featurepolls` (send a curated bundle of roadmap feature polls)
 - `/video <job_id>`
 
 ### Runtime Control Commands

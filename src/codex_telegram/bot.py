@@ -33,6 +33,7 @@ from .approval_polls import (
 )
 from .assistant_polls import AssistantPoll, AssistantPollStore
 from .executor import RuntimeProfileError
+from .feature_polls import FEATURE_ROADMAP_POLLS
 from .models import JobMode, JobStatus
 from .orchestrator import Orchestrator
 from .sessions import SessionManager
@@ -56,6 +57,7 @@ send file or image (optional caption or /run caption) - enqueue attachment-aware
 /diff [scope] - ask Codex for concise git diff summary
 /plan <task> - ask Codex for a detailed implementation plan
 /poll [question | option1 | option2 ...] - send a manual test poll
+/featurepolls - send a bundle of roadmap feature polls
 /model [name] [reasoning] - show/set model + reasoning effort
 /permissions [auto|read-only|full-access|workspace-write|danger-full-access|reset] - set execution permissions
 /approvals [untrusted|on-failure|on-request|never|reset] - show/set Codex approval policy
@@ -815,6 +817,50 @@ def build_dispatcher(
             )
         )
         await message.answer("Test poll created. Vote in the poll to trigger the poll-answer flow.")
+
+    @router.message(Command("featurepolls"))
+    async def feature_polls_handler(message: Message) -> None:
+        if not await guard.authorize(message):
+            return
+
+        created = 0
+        failures: list[str] = []
+        for idx, template in enumerate(FEATURE_ROADMAP_POLLS, start=1):
+            try:
+                sent = await bot.send_poll(
+                    chat_id=_chat_id(message),
+                    question=template.question,
+                    options=list(template.options),
+                    is_anonymous=False,
+                    allows_multiple_answers=template.allows_multiple_answers,
+                )
+            except Exception as exc:
+                failures.append(f"Poll {idx} failed: {exc}")
+                continue
+
+            if sent.poll is None or not sent.poll.id:
+                failures.append(f"Poll {idx} failed: response did not include poll metadata.")
+                continue
+
+            active_assistant_polls.register(
+                AssistantPoll(
+                    poll_id=sent.poll.id,
+                    source_job_id=None,
+                    chat_id=_chat_id(message),
+                    message_id=int(sent.message_id),
+                    question=template.question,
+                    options=template.options,
+                    allows_multiple_answers=template.allows_multiple_answers,
+                )
+            )
+            created += 1
+
+        if created:
+            await message.answer(
+                f"Created {created} feature poll(s). Vote to prioritize what we build next."
+            )
+        if failures:
+            await message.answer("\n".join(failures))
 
     @router.message(Command("model"))
     async def model_handler(message: Message) -> None:

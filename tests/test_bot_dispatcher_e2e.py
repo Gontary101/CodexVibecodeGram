@@ -12,6 +12,7 @@ from aiogram.types import Update
 from codex_telegram.approval_polls import ApprovalPoll, ApprovalPollStore
 from codex_telegram.assistant_polls import AssistantPoll, AssistantPollStore
 from codex_telegram.bot import build_dispatcher
+from codex_telegram.feature_polls import FEATURE_ROADMAP_POLLS
 from codex_telegram.models import JobMode, JobStatus, SessionRecord, SessionStatus
 from codex_telegram.sessions import SessionCreateResult
 
@@ -517,6 +518,59 @@ async def test_dispatcher_poll_command_sends_and_registers_test_poll(
     assert tracked.message_id == 333
     assert tracked.options == ("Yes, works", "Partially works", "No, needs fixes")
     assert any("Test poll created." in text for text in sent_texts)
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_featurepolls_command_sends_curated_polls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sent_texts: list[str] = []
+    sent_polls: list[tuple[str, list[str]]] = []
+
+    async def _fake_call(self, method, request_timeout=None):  # type: ignore[no-untyped-def]
+        name = method.__class__.__name__
+        if name == "SendMessage":
+            sent_texts.append(str(getattr(method, "text", "")))
+            return None
+        if name == "SendPoll":
+            poll_index = len(sent_polls) + 1
+            sent_polls.append((str(method.question), [str(option) for option in method.options]))
+            return SimpleNamespace(message_id=400 + poll_index, poll=SimpleNamespace(id=f"feature-poll-{poll_index}"))
+        return None
+
+    monkeypatch.setattr(Bot, "__call__", _fake_call)
+
+    bot = Bot("12345:token")
+    orchestrator = FakeOrchestrator()
+    sessions = FakeSessionManager()
+    assistant_polls = AssistantPollStore()
+    dispatcher = build_dispatcher(
+        bot=bot,
+        orchestrator=orchestrator,  # type: ignore[arg-type]
+        session_manager=sessions,  # type: ignore[arg-type]
+        video_service=FakeVideoService(),  # type: ignore[arg-type]
+        owner_user_id=42,
+        command_cooldown_seconds=0.0,
+        runs_dir=tmp_path / "runs",
+        assistant_polls=assistant_polls,
+    )
+
+    await dispatcher.feed_update(bot, _make_update("/featurepolls", user_id=42, chat_id=42, update_id=1))
+
+    expected_count = len(FEATURE_ROADMAP_POLLS)
+    assert sent_polls == [(template.question, list(template.options)) for template in FEATURE_ROADMAP_POLLS]
+    assert len(sent_polls) == expected_count
+    for idx, template in enumerate(FEATURE_ROADMAP_POLLS, start=1):
+        tracked = assistant_polls.get(f"feature-poll-{idx}")
+        assert tracked is not None
+        assert tracked.source_job_id is None
+        assert tracked.chat_id == 42
+        assert tracked.message_id == 400 + idx
+        assert tracked.question == template.question
+        assert tracked.options == template.options
+        assert tracked.allows_multiple_answers == template.allows_multiple_answers
+    assert any(f"Created {expected_count} feature poll(s)." in text for text in sent_texts)
 
 
 @pytest.mark.asyncio
