@@ -124,11 +124,29 @@ class Orchestrator:
     def set_approvals(self, policy: str | None) -> RuntimeProfile:
         return self._executor.set_approval_policy(policy)
 
+    def get_effective_approval_policy(self) -> str:
+        return self._executor.get_effective_approval_policy()
+
     def set_search(self, enabled: bool) -> RuntimeProfile:
         return self._executor.set_search(enabled)
 
     def set_web_search_mode(self, mode: str | None) -> RuntimeProfile:
         return self._executor.set_web_search_mode(mode)
+
+    def get_effective_workdir(self):
+        return self._executor.get_effective_workdir()
+
+    def get_allowed_workdirs(self):
+        return self._executor.get_allowed_workdirs()
+
+    def set_workdir(self, path_value: str | None):
+        return self._executor.set_workdir(path_value)
+
+    def get_active_session_for_chat(self, chat_id: int) -> str | None:
+        return self._repo.get_active_session_for_chat(chat_id)
+
+    def set_active_session_for_chat(self, chat_id: int, session_name: str | None) -> None:
+        self._repo.set_active_session_for_chat(chat_id, session_name)
 
     def set_personality(self, personality: str, custom_instruction: str | None = None) -> RuntimeProfile:
         return self._executor.set_personality(personality, custom_instruction)
@@ -234,6 +252,17 @@ class Orchestrator:
             await self._notifier.send_job_status(failed, "Job failed")
             return
 
+        executor_workdir = (
+            self._executor.get_effective_workdir()
+            if hasattr(self._executor, "get_effective_workdir")
+            else self._settings.codex_workdir
+        )
+        allowed_roots = (
+            self._executor.get_allowed_workdirs()
+            if hasattr(self._executor, "get_allowed_workdirs")
+            else self._settings.codex_allowed_workdirs
+        )
+
         self._artifact_service.collect_from_run_dir(job.id, run_dir)
         self._artifact_service.collect_from_output_texts(
             job.id,
@@ -243,8 +272,8 @@ class Orchestrator:
                 result.summary or "",
                 result.error_text or "",
             ],
-            base_dir=self._settings.codex_workdir,
-            roots=[self._settings.codex_workdir, self._settings.runs_dir],
+            base_dir=result.exec_cwd or executor_workdir,
+            roots=[*allowed_roots, self._settings.runs_dir],
         )
 
         if result.exit_code == 0:

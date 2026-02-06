@@ -1,9 +1,9 @@
 from codex_telegram.bot import _parse_model_payload
 
 
-def test_parse_model_payload_list_is_help() -> None:
+def test_parse_model_payload_list_is_list_action() -> None:
     action, model, reasoning = _parse_model_payload("list")
-    assert action == "help"
+    assert action == "list"
     assert model is None
     assert reasoning is None
 

@@ -97,6 +97,7 @@ class ExecutionResult:
     stderr_path: Path
     summary: str
     error_text: str | None = None
+    exec_cwd: Path | None = None
 
 
 @dataclass(slots=True)

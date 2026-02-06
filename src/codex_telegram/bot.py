@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, Router
@@ -22,8 +24,15 @@ from .video import VideoError, VideoService
 HELP_TEXT = """
 Commands:
 /start - show this help
-/run <prompt> - enqueue an ephemeral Codex job
-/run_session <session_name> <prompt> - enqueue a session-mode job
+/run <prompt> - enqueue a job (uses active session when set)
+/run_session <session_name> <prompt> - enqueue a job in explicit session mode
+/new [name] - create a session and set it as active for this chat
+/resume <session_name_or_id> - activate/resume a session for this chat
+/fork [source_session] - create a forked session and activate it
+/session [list|create|stop|use|clear] [name] - manage sessions and active session pointer
+/agent [list|switch <name>] - lightweight agent profile routing hint
+/mention <path> <prompt> - run prompt with explicit file mention context
+/init [extra instructions] - scaffold an AGENTS.md style instruction prompt via Codex
 /review [scope] - run a code-review style Codex job
 /diff [scope] - ask Codex for concise git diff summary
 /plan <task> - ask Codex for a detailed implementation plan
@@ -31,6 +40,7 @@ Commands:
 /permissions [auto|read-only|full-access|workspace-write|danger-full-access|reset] - set execution permissions
 /approvals [untrusted|on-failure|on-request|never|reset] - show/set Codex approval policy
 /search [live|cached|disabled|on|off|reset] - show/set web search mode for Codex jobs
+/workdir [show|set <path>|reset] - show/set Codex working directory (allowlist enforced)
 /experimental [list|clear|on <feature>|off <feature>] - toggle experimental features
 /personality [friendly|pragmatic|none|custom <instruction>] - response style preset
 /mcp [list|get <name>] - inspect configured MCP servers
@@ -44,9 +54,6 @@ Commands:
 /reject <job_id> - reject a waiting job
 /cancel <job_id> - cancel queued or running job
 /video <job_id> - generate and send recap video
-/session create <name> - activate a named session
-/session stop <name> - stop a named session
-/session list - list known sessions
 """.strip()
 
 
@@ -84,6 +91,34 @@ def _args(message: Message) -> str:
     return parts[1].strip()
 
 
+def _split_args(payload: str) -> list[str]:
+    if not payload.strip():
+        return []
+    try:
+        return shlex.split(payload)
+    except ValueError:
+        return payload.split()
+
+
+def _chat_id(message: Message) -> int:
+    if message.chat is not None:
+        return int(message.chat.id)
+    user = message.from_user
+    if user is None:
+        raise RuntimeError("Message has no chat or user")
+    return int(user.id)
+
+
+def _auto_session_name(prefix: str = "session") -> str:
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    return f"{prefix}-{stamp}"
+
+
+def _sanitize_session_token(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "-", value.strip())
+    return cleaned.strip("-") or "session"
+
+
 def _parse_job_id(arg: str) -> int | None:
     try:
         return int(arg)
@@ -109,8 +144,10 @@ def _parse_model_payload(payload: str) -> tuple[str, str | None, str | None]:
     first_raw = parts[0]
     first = first_raw.lower()
 
-    if first in {"help", "list"}:
+    if first == "help":
         return ("help", None, None)
+    if first == "list":
+        return ("list", None, None)
 
     model = None if first in {"default", "reset"} else first_raw
     reasoning: str | None = None
@@ -212,15 +249,19 @@ def _render_experimental_status(orchestrator: Orchestrator, catalog: list[tuple[
 
 def _format_runtime(orchestrator: Orchestrator) -> str:
     profile = orchestrator.get_runtime_profile()
+    effective_approvals = orchestrator.get_effective_approval_policy()
+    allowed_roots = ", ".join(str(p) for p in orchestrator.get_allowed_workdirs())
     return "\n".join(
         [
             "Runtime profile:",
             f"model={profile.model or '(default)'}",
             f"reasoning_effort={profile.reasoning_effort or '(default)'}",
             f"permissions={profile.sandbox_mode or '(default)'}",
-            f"approvals={profile.approval_policy or '(default)'}",
+            f"approvals={profile.approval_policy or f'(default:{effective_approvals})'}",
             f"web_search={profile.web_search or '(default)'}",
             f"personality={profile.personality}",
+            f"workdir={orchestrator.get_effective_workdir()}",
+            f"allowed_workdirs={allowed_roots}",
             "experimental="
             + (", ".join(sorted(profile.experimental_features)) if profile.experimental_features else "(none)"),
         ]
@@ -247,6 +288,7 @@ def build_dispatcher(
 ) -> Dispatcher:
     dispatcher = Dispatcher()
     router = Router()
+    chat_agents: dict[int, str] = {}
     guard = CommandGuard(
         BotContext(
             owner_user_id=owner_user_id,
@@ -268,7 +310,29 @@ def build_dispatcher(
         if not prompt:
             await message.answer("Usage: /run <prompt>")
             return
-        job = await orchestrator.submit_job(prompt=prompt, mode=JobMode.EPHEMERAL)
+        chat_id = _chat_id(message)
+        active_session = orchestrator.get_active_session_for_chat(chat_id)
+        if active_session:
+            if not session_manager.is_session_active(active_session):
+                await message.answer(
+                    f"Active session `{active_session}` is inactive. Use /resume {active_session} or /session clear."
+                )
+                return
+            agent_hint = chat_agents.get(chat_id)
+            effective_prompt = (
+                f"Use agent profile `{agent_hint}` for this response.\n\n{prompt}" if agent_hint else prompt
+            )
+            job = await orchestrator.submit_job(
+                prompt=effective_prompt,
+                mode=JobMode.SESSION,
+                session_name=active_session,
+            )
+            await message.answer(f"Queued session job {job.id} in `{active_session}` ({job.status})")
+            return
+
+        agent_hint = chat_agents.get(chat_id)
+        effective_prompt = f"Use agent profile `{agent_hint}` for this response.\n\n{prompt}" if agent_hint else prompt
+        job = await orchestrator.submit_job(prompt=effective_prompt, mode=JobMode.EPHEMERAL)
         await message.answer(f"Queued job {job.id} with status {job.status}")
 
     @router.message(Command("run_session"))
@@ -288,7 +352,120 @@ def build_dispatcher(
             await message.answer(f"Session '{session_name}' is inactive. Use /session create {session_name}")
             return
         job = await orchestrator.submit_job(prompt=prompt, mode=JobMode.SESSION, session_name=session_name)
+        orchestrator.set_active_session_for_chat(_chat_id(message), session_name)
         await message.answer(f"Queued session job {job.id} with status {job.status}")
+
+    @router.message(Command("new"))
+    async def new_handler(message: Message) -> None:
+        if not await guard.authorize(message):
+            return
+        payload = _args(message).strip()
+        raw_name = payload or _auto_session_name("session")
+        name = _sanitize_session_token(raw_name)
+        try:
+            result = await session_manager.create(name)
+        except Exception as exc:
+            await message.answer(f"Failed to create session: {exc}")
+            return
+        chat_id = _chat_id(message)
+        orchestrator.set_active_session_for_chat(chat_id, name)
+        status = "created" if result.created else "already active"
+        await message.answer(f"Session {name}: {status}\nActive session set to `{name}`.")
+
+    @router.message(Command("resume"))
+    async def resume_handler(message: Message) -> None:
+        if not await guard.authorize(message):
+            return
+        session_name = _args(message).strip()
+        if not session_name:
+            await message.answer("Usage: /resume <session_name_or_id>")
+            return
+        session_name = _sanitize_session_token(session_name)
+        try:
+            await session_manager.create(session_name)
+        except Exception as exc:
+            await message.answer(f"Failed to resume session: {exc}")
+            return
+        chat_id = _chat_id(message)
+        orchestrator.set_active_session_for_chat(chat_id, session_name)
+        await message.answer(f"Active session set to `{session_name}`.")
+
+    @router.message(Command("fork"))
+    async def fork_handler(message: Message) -> None:
+        if not await guard.authorize(message):
+            return
+        chat_id = _chat_id(message)
+        payload = _args(message).strip()
+        source = _sanitize_session_token(payload) if payload else orchestrator.get_active_session_for_chat(chat_id)
+        if not source:
+            await message.answer("Usage: /fork <source_session>\nTip: set one first with /new or /resume.")
+            return
+        fork_name = _sanitize_session_token(f"{source}-fork-{datetime.now(UTC).strftime('%H%M%S')}")
+        try:
+            await session_manager.create(fork_name)
+        except Exception as exc:
+            await message.answer(f"Failed to fork session: {exc}")
+            return
+        orchestrator.set_active_session_for_chat(chat_id, fork_name)
+        await message.answer(f"Forked `{source}` -> `{fork_name}` and set it as active.")
+
+    @router.message(Command("agent"))
+    async def agent_handler(message: Message) -> None:
+        if not await guard.authorize(message):
+            return
+        chat_id = _chat_id(message)
+        payload = _args(message).strip()
+        if not payload or payload.lower() == "list":
+            active = chat_agents.get(chat_id, "default")
+            await message.answer(f"Agents:\n- default\nActive agent={active}\nUsage: /agent switch <name>")
+            return
+        parts = _split_args(payload)
+        action = parts[0].lower() if parts else ""
+        if action == "switch" and len(parts) >= 2:
+            name = _sanitize_session_token(parts[1])
+            chat_agents[chat_id] = name
+            await message.answer(f"Active agent set to `{name}` for this chat.")
+            return
+        if action in {"reset", "clear"}:
+            chat_agents.pop(chat_id, None)
+            await message.answer("Active agent reset to default.")
+            return
+        await message.answer("Usage: /agent [list|switch <name>|reset]")
+
+    @router.message(Command("mention"))
+    async def mention_handler(message: Message) -> None:
+        if not await guard.authorize(message):
+            return
+        payload = _args(message).strip()
+        parts = _split_args(payload)
+        if len(parts) < 2:
+            await message.answer("Usage: /mention <path> <prompt>")
+            return
+        mention_path = parts[0]
+        task_prompt = " ".join(parts[1:]).strip()
+        prompt = f"Use context from `{mention_path}` in the current workdir while answering.\n\n{task_prompt}"
+        chat_id = _chat_id(message)
+        active_session = orchestrator.get_active_session_for_chat(chat_id)
+        if active_session and session_manager.is_session_active(active_session):
+            job = await orchestrator.submit_job(prompt=prompt, mode=JobMode.SESSION, session_name=active_session)
+            await message.answer(f"Queued session mention job {job.id} in `{active_session}` ({job.status})")
+            return
+        job = await orchestrator.submit_job(prompt=prompt, mode=JobMode.EPHEMERAL)
+        await message.answer(f"Queued mention job {job.id} with status {job.status}")
+
+    @router.message(Command("init"))
+    async def init_handler(message: Message) -> None:
+        if not await guard.authorize(message):
+            return
+        extra = _args(message).strip()
+        prompt = (
+            "Create or refresh an AGENTS.md file for this repository. Keep it concise and practical for Codex use.\n"
+            "Include: code style rules, testing workflow, and safe execution constraints."
+        )
+        if extra:
+            prompt += f"\n\nExtra requirements:\n{extra}"
+        job = await orchestrator.submit_job(prompt=prompt, mode=JobMode.EPHEMERAL)
+        await message.answer(f"Queued init job {job.id} with status {job.status}")
 
     @router.message(Command("review"))
     async def review_handler(message: Message) -> None:
@@ -351,6 +528,20 @@ def build_dispatcher(
         if action == "help":
             await message.answer(_model_help_text(orchestrator))
             return
+        if action == "list":
+            code, stdout, stderr = await asyncio.to_thread(_run_codex_capture, ["exec", "-h"])
+            if code != 0:
+                error_line = stderr.strip().splitlines()[-1] if stderr.strip() else "unknown error"
+                await message.answer(f"Unable to inspect model options from Codex CLI: {error_line}")
+                return
+            hint = "Codex CLI does not expose a non-interactive model catalog; use model names from your account."
+            if "--model <MODEL>" in stdout:
+                hint = (
+                    "Model names are account/provider specific.\n"
+                    "Use `/model <name>` with a known model (example: `/model gpt-5-codex high`)."
+                )
+            await message.answer(hint)
+            return
         try:
             updated = orchestrator.set_model(model, reasoning)
         except RuntimeProfileError as exc:
@@ -368,7 +559,9 @@ def build_dispatcher(
         if not payload:
             profile = orchestrator.get_runtime_profile()
             await message.answer(
-                f"permissions={profile.sandbox_mode or '(default)'}\napprovals={profile.approval_policy or '(default)'}"
+                "permissions="
+                f"{profile.sandbox_mode or '(default)'}\n"
+                f"approvals={profile.approval_policy or f'(default:{orchestrator.get_effective_approval_policy()})'}"
             )
             return
         mode_arg = payload.strip().lower()
@@ -396,7 +589,7 @@ def build_dispatcher(
             return
         await message.answer(
             f"Permissions updated: {updated.sandbox_mode or '(default)'}\n"
-            f"approvals={updated.approval_policy or '(default)'}"
+            f"approvals={updated.approval_policy or f'(default:{orchestrator.get_effective_approval_policy()})'}"
         )
 
     @router.message(Command("approvals"))
@@ -406,7 +599,9 @@ def build_dispatcher(
         payload = _args(message)
         if not payload:
             profile = orchestrator.get_runtime_profile()
-            await message.answer(f"approvals={profile.approval_policy or '(default)'}")
+            await message.answer(
+                f"approvals={profile.approval_policy or f'(default:{orchestrator.get_effective_approval_policy()})'}"
+            )
             return
         policy_arg = payload.strip().lower()
         policy = None if policy_arg in {"default", "reset"} else policy_arg
@@ -415,7 +610,9 @@ def build_dispatcher(
         except RuntimeProfileError as exc:
             await message.answer(str(exc))
             return
-        await message.answer(f"Approvals updated: {updated.approval_policy or '(default)'}")
+        await message.answer(
+            f"Approvals updated: {updated.approval_policy or f'(default:{orchestrator.get_effective_approval_policy()})'}"
+        )
 
     @router.message(Command("search"))
     async def search_handler(message: Message) -> None:
@@ -450,6 +647,45 @@ def build_dispatcher(
             await message.answer(str(exc))
             return
         await message.answer(f"Web search updated: {updated.web_search or '(default)'}")
+
+    @router.message(Command("workdir"))
+    async def workdir_handler(message: Message) -> None:
+        if not await guard.authorize(message):
+            return
+        payload = _args(message).strip()
+        current = orchestrator.get_effective_workdir()
+        allowed = orchestrator.get_allowed_workdirs()
+        allowed_text = ", ".join(str(p) for p in allowed)
+
+        if not payload or payload.lower() in {"show", "list"}:
+            await message.answer(
+                f"workdir={current}\nallowed_roots={allowed_text}\nUsage: /workdir set <path> | /workdir reset"
+            )
+            return
+
+        if payload.lower() in {"reset", "default"}:
+            try:
+                orchestrator.set_workdir(None)
+            except RuntimeProfileError as exc:
+                await message.answer(str(exc))
+                return
+            await message.answer(f"Workdir reset to default: {orchestrator.get_effective_workdir()}")
+            return
+
+        if payload.lower().startswith("set "):
+            path_value = payload[4:].strip()
+            if not path_value:
+                await message.answer("Usage: /workdir set <path>")
+                return
+            try:
+                orchestrator.set_workdir(path_value)
+            except RuntimeProfileError as exc:
+                await message.answer(str(exc))
+                return
+            await message.answer(f"Workdir updated: {orchestrator.get_effective_workdir()}")
+            return
+
+        await message.answer("Usage: /workdir [show|set <path>|reset]")
 
     @router.message(Command("experimental"))
     async def experimental_handler(message: Message) -> None:
@@ -521,8 +757,12 @@ def build_dispatcher(
     async def status_handler(message: Message) -> None:
         if not await guard.authorize(message):
             return
+        chat_id = _chat_id(message)
         counts = orchestrator.count_jobs_by_status()
         lines = [_format_runtime(orchestrator), ""]
+        lines.append(f"active_session_for_chat={orchestrator.get_active_session_for_chat(chat_id) or '(none)'}")
+        lines.append(f"active_agent_for_chat={chat_agents.get(chat_id, 'default')}")
+        lines.append("")
         lines.append("Job counts:")
         for status in sorted(counts):
             lines.append(f"{status}={counts[status]}")
@@ -622,15 +862,9 @@ def build_dispatcher(
         Command(
             commands=[
                 "skills",
-                "new",
-                "resume",
-                "fork",
-                "agent",
                 "collab",
                 "apps",
                 "rename",
-                "mention",
-                "init",
                 "ps",
                 "feedback",
                 "logout",
@@ -645,7 +879,7 @@ def build_dispatcher(
         await message.answer(
             f"{command_name} is an interactive Codex CLI command and is not fully mapped in Telegram yet.\n"
             "Available Telegram controls: /model, /permissions, /approvals, /search, /experimental, "
-            "/personality, /status, /compact, /review, /diff, /plan."
+            "/personality, /status, /compact, /review, /diff, /plan, /new, /resume, /fork."
         )
 
     @router.message(Command("jobs"))
@@ -814,25 +1048,34 @@ def build_dispatcher(
     async def session_handler(message: Message) -> None:
         if not await guard.authorize(message):
             return
+        chat_id = _chat_id(message)
+        active_for_chat = orchestrator.get_active_session_for_chat(chat_id)
         payload = _args(message)
-        parts = payload.split()
+        parts = _split_args(payload)
         subcommand = parts[0].lower() if parts else "list"
 
         if subcommand == "list":
             sessions = session_manager.list_sessions()
+            lines = [f"Active session for this chat: {active_for_chat or '(none)'}", "", "Sessions:"]
             if not sessions:
-                await message.answer("No sessions")
+                lines.append("(none)")
+                await message.answer("\n".join(lines))
                 return
-            lines = ["Sessions:"]
             for session in sessions:
-                lines.append(f"{session.name}: {session.status} pid={session.pid}")
+                marker = " <- active" if active_for_chat and session.name == active_for_chat else ""
+                lines.append(f"{session.name}: {session.status} pid={session.pid}{marker}")
             await message.answer("\n".join(lines))
             return
 
-        if len(parts) < 2:
-            await message.answer("Usage: /session <create|stop> <name>")
+        if subcommand in {"clear", "reset"}:
+            orchestrator.set_active_session_for_chat(chat_id, None)
+            await message.answer("Active session cleared for this chat.")
             return
-        name = parts[1]
+
+        if len(parts) < 2:
+            await message.answer("Usage: /session <create|stop|use|clear|list> [name]")
+            return
+        name = _sanitize_session_token(parts[1])
 
         if subcommand == "create":
             try:
@@ -840,8 +1083,9 @@ def build_dispatcher(
             except Exception as exc:
                 await message.answer(f"Failed to create session: {exc}")
                 return
+            orchestrator.set_active_session_for_chat(chat_id, name)
             status = "created" if result.created else "already active"
-            await message.answer(f"Session {name}: {status}")
+            await message.answer(f"Session {name}: {status}\nActive session set to `{name}`.")
             return
 
         if subcommand == "stop":
@@ -850,10 +1094,20 @@ def build_dispatcher(
             except KeyError:
                 await message.answer(f"Session {name} not found")
                 return
+            if active_for_chat == name:
+                orchestrator.set_active_session_for_chat(chat_id, None)
             await message.answer(f"Session {name} stopped (status={record.status})")
             return
 
-        await message.answer("Unknown session subcommand. Use create|stop|list")
+        if subcommand in {"use", "resume"}:
+            if not session_manager.is_session_active(name):
+                await message.answer(f"Session {name} is not active. Use /resume {name} or /session create {name}.")
+                return
+            orchestrator.set_active_session_for_chat(chat_id, name)
+            await message.answer(f"Active session set to `{name}`.")
+            return
+
+        await message.answer("Unknown session subcommand. Use create|stop|use|clear|list")
 
     @router.message()
     async def fallback_handler(message: Message) -> None:

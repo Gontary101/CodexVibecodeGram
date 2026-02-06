@@ -82,3 +82,20 @@ def test_count_jobs_by_status(tmp_path: Path) -> None:
 
     assert counts["succeeded"] >= 1
     assert counts["failed"] >= 1
+
+
+def test_chat_active_session_persistence(tmp_path: Path) -> None:
+    db = Database(tmp_path / "state.sqlite3")
+    db.init_schema()
+    repo = Repository(db)
+
+    assert repo.get_active_session_for_chat(1001) is None
+
+    repo.set_active_session_for_chat(1001, "session-a")
+    assert repo.get_active_session_for_chat(1001) == "session-a"
+
+    repo.set_active_session_for_chat(1001, "session-b")
+    assert repo.get_active_session_for_chat(1001) == "session-b"
+
+    repo.set_active_session_for_chat(1001, None)
+    assert repo.get_active_session_for_chat(1001) is None

@@ -40,10 +40,19 @@ class RuntimeProfile:
     experimental_features: set[str] = field(default_factory=set)
     personality: str = DEFAULT_PERSONALITY_PRESET
     personality_instruction: str = ""
+    workdir_override: Path | None = None
 
 
 def _normalize_feature(name: str) -> str:
     return name.strip().lower().replace(" ", "-")
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _tail_text(path: Path, max_chars: int = 3200) -> str:
@@ -55,6 +64,13 @@ def _tail_text(path: Path, max_chars: int = 3200) -> str:
     return text[-max_chars:].strip()
 
 
+def _read_text(path: Path, max_chars: int = 12000) -> str:
+    if not path.exists() or not path.is_file():
+        return ""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return text[:max_chars].strip()
+
+
 class CodexExecutor:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -62,6 +78,15 @@ class CodexExecutor:
 
     def get_runtime_profile(self) -> RuntimeProfile:
         return replace(self._runtime, experimental_features=set(self._runtime.experimental_features))
+
+    def get_effective_approval_policy(self) -> str:
+        return self._runtime.approval_policy or self._settings.codex_safe_default_approval
+
+    def get_allowed_workdirs(self) -> tuple[Path, ...]:
+        return self._settings.codex_allowed_workdirs
+
+    def get_effective_workdir(self) -> Path:
+        return self._runtime.workdir_override or self._settings.codex_workdir
 
     def set_model(self, model: str | None, reasoning_effort: str | None = None) -> RuntimeProfile:
         self._runtime.model = model.strip() if model else None
@@ -146,6 +171,27 @@ class CodexExecutor:
         self._runtime.experimental_features.clear()
         return self.get_runtime_profile()
 
+    def set_workdir(self, path_value: str | None) -> RuntimeProfile:
+        if path_value is None:
+            self._runtime.workdir_override = None
+            return self.get_runtime_profile()
+
+        raw = Path(path_value.strip()).expanduser()
+        if not str(raw):
+            raise RuntimeProfileError("Workdir path cannot be empty.")
+        base = self.get_effective_workdir()
+        candidate = (base / raw).resolve() if not raw.is_absolute() else raw.resolve()
+        if not candidate.exists() or not candidate.is_dir():
+            raise RuntimeProfileError(f"Workdir does not exist or is not a directory: {candidate}")
+
+        allowed = self.get_allowed_workdirs()
+        if not any(_is_within(candidate, root) for root in allowed):
+            allowed_text = ", ".join(str(p) for p in allowed)
+            raise RuntimeProfileError(f"Workdir is outside allowed roots. Allowed: {allowed_text}")
+
+        self._runtime.workdir_override = candidate
+        return self.get_runtime_profile()
+
     def _runtime_cli_flags(self) -> list[str]:
         flags: list[str] = []
         if self._runtime.model:
@@ -155,8 +201,9 @@ class CodexExecutor:
             flags.append(f"-c {shlex.quote(config_value)}")
         if self._runtime.sandbox_mode:
             flags.append(f"-s {self._runtime.sandbox_mode}")
-        if self._runtime.approval_policy:
-            config_value = f'approval_policy="{self._runtime.approval_policy}"'
+        approval_policy = self._runtime.approval_policy or self._settings.codex_safe_default_approval
+        if approval_policy:
+            config_value = f'approval_policy="{approval_policy}"'
             flags.append(f"-c {shlex.quote(config_value)}")
         if self._runtime.web_search:
             config_value = f'web_search="{self._runtime.web_search}"'
@@ -182,7 +229,7 @@ class CodexExecutor:
         return f"{start}{marker}{' '.join(flags)} {rest}".strip()
 
     def _ensure_skip_git_repo_check(self, command: str) -> str:
-        if not self._settings.codex_skip_git_repo_check:
+        if not self._settings.codex_skip_git_repo_check or not self._settings.codex_auto_safe_flags:
             return command
         if "--skip-git-repo-check" in command:
             return command
@@ -198,6 +245,24 @@ class CodexExecutor:
         rest = command[idx + len(marker) :]
         return f"{start}{marker}--skip-git-repo-check {rest}".strip()
 
+    def _inject_output_last_message(self, command: str, output_path: Path | None) -> str:
+        if output_path is None:
+            return command
+        if "--output-last-message" in command or " -o " in command:
+            return command
+        quoted = shlex.quote(str(output_path))
+        marker = "codex exec "
+        if command.startswith(marker):
+            return f"{marker}-o {quoted} {command[len(marker):]}".strip()
+        if command.strip() == "codex exec":
+            return f"codex exec -o {quoted}"
+        idx = command.find(marker)
+        if idx == -1:
+            return command
+        start = command[:idx]
+        rest = command[idx + len(marker) :]
+        return f"{start}{marker}-o {quoted} {rest}".strip()
+
     def _apply_personality(self, prompt: str) -> str:
         if self._runtime.personality == "custom":
             instruction = self._runtime.personality_instruction.strip()
@@ -207,7 +272,7 @@ class CodexExecutor:
             return prompt
         return f"{instruction}\n\n{prompt}"
 
-    def build_plan(self, ctx: ExecutionContext) -> ExecutionPlan:
+    def build_plan(self, ctx: ExecutionContext, output_last_message_path: Path | None = None) -> ExecutionPlan:
         prompt = self._apply_personality(ctx.job.prompt)
         template = (
             self._settings.codex_session_cmd_template
@@ -221,10 +286,13 @@ class CodexExecutor:
             "session_name": ctx.job.session_name or "",
             "session_name_quoted": shlex.quote(ctx.job.session_name or ""),
             "approved": "1" if ctx.approved else "0",
+            "output_last_message_path": str(output_last_message_path or ""),
+            "output_last_message_path_quoted": shlex.quote(str(output_last_message_path or "")),
         }
         command = template.format(**vars_map)
         command = self._inject_runtime_flags(command)
         command = self._ensure_skip_git_repo_check(command)
+        command = self._inject_output_last_message(command, output_last_message_path)
         return ExecutionPlan(command=command, env_overrides={"JOB_ID": str(ctx.job.id)})
 
     async def execute(self, ctx: ExecutionContext) -> ExecutionResult:
@@ -234,14 +302,17 @@ class CodexExecutor:
         prompt_path = ctx.run_dir / "prompt.txt"
         prompt_path.write_text(ctx.job.prompt, encoding="utf-8")
 
-        plan = self.build_plan(ctx)
+        last_message_path = ctx.run_dir / "assistant_last_message.txt"
+        output_path = last_message_path if self._settings.telegram_response_mode in {"natural", "compact"} else None
+        plan = self.build_plan(ctx, output_last_message_path=output_path)
+        workdir = self.get_effective_workdir()
 
         proc: asyncio.subprocess.Process | None = None
         try:
             with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
                 proc = await asyncio.create_subprocess_shell(
                     plan.command,
-                    cwd=str(self._settings.codex_workdir),
+                    cwd=str(workdir),
                     env={**os.environ, **plan.env_overrides},
                     stdout=stdout_file,
                     stderr=stderr_file,
@@ -257,6 +328,7 @@ class CodexExecutor:
                         stderr_path=stderr_path,
                         summary="Timed out while executing Codex command",
                         error_text="Job exceeded timeout limit",
+                        exec_cwd=workdir,
                     )
 
             stdout_tail = _tail_text(stdout_path)
@@ -264,7 +336,9 @@ class CodexExecutor:
             exit_code = proc.returncode if proc else 1
 
             if exit_code == 0:
-                summary = stdout_tail or "Completed."
+                summary = _read_text(last_message_path)
+                if not summary:
+                    summary = stdout_tail or "Completed."
                 error_text = None
             else:
                 summary = "Execution failed."
@@ -275,6 +349,7 @@ class CodexExecutor:
                 stderr_path=stderr_path,
                 summary=summary,
                 error_text=error_text,
+                exec_cwd=workdir,
             )
         except asyncio.CancelledError:
             if proc and proc.returncode is None:

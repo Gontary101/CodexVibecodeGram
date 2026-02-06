@@ -46,6 +46,16 @@ async def test_success_notification_is_plain_summary() -> None:
 
 
 @pytest.mark.asyncio
+async def test_success_notification_compact_adds_job_footer() -> None:
+    bot = FakeBot()
+    notifier = TelegramNotifier(bot=bot, owner_chat_id=123, response_mode="compact")
+
+    await notifier.send_job_status(_job(JobStatus.SUCCEEDED, summary="Hello from Codex"), "Job completed")
+
+    assert bot.messages == [(123, "Hello from Codex\n\n(job 7)")]
+
+
+@pytest.mark.asyncio
 async def test_send_artifacts_skips_log_kind(tmp_path: Path) -> None:
     bot = FakeBot()
     notifier = TelegramNotifier(bot=bot, owner_chat_id=123)

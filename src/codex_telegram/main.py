@@ -33,7 +33,11 @@ async def _run_async() -> None:
 
     bot = Bot(token=settings.telegram_bot_token)
 
-    notifier = TelegramNotifier(bot=bot, owner_chat_id=settings.owner_telegram_id)
+    notifier = TelegramNotifier(
+        bot=bot,
+        owner_chat_id=settings.owner_telegram_id,
+        response_mode=settings.telegram_response_mode,
+    )
     policy = RiskPolicy()
     executor = CodexExecutor(settings)
     artifact_service = ArtifactService(repo=repo, settings=settings)
