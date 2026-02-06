@@ -512,6 +512,7 @@ async def test_dispatcher_poll_command_sends_and_registers_test_poll(
     ]
     tracked = assistant_polls.get("manual-poll-333")
     assert tracked is not None
+    assert tracked.source_job_id is None
     assert tracked.chat_id == 42
     assert tracked.message_id == 333
     assert tracked.options == ("Yes, works", "Partially works", "No, needs fixes")
@@ -730,3 +731,51 @@ async def test_dispatcher_assistant_poll_answer_queues_follow_up_job(
     assert mode == JobMode.EPHEMERAL
     assert "Selected option(s): B" in prompt
     assert any("Queued follow-up job" in text for text in sent_texts)
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_manual_assistant_poll_answer_omits_fake_job_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def _fake_call(self, method, request_timeout=None):  # type: ignore[no-untyped-def]
+        return None
+
+    monkeypatch.setattr(Bot, "__call__", _fake_call)
+
+    bot = Bot("12345:token")
+    orchestrator = FakeOrchestrator()
+    sessions = FakeSessionManager()
+    assistant_polls = AssistantPollStore()
+    assistant_polls.register(
+        AssistantPoll(
+            poll_id="assistant-poll-manual",
+            source_job_id=None,
+            chat_id=42,
+            message_id=501,
+            question="Does this poll flow work?",
+            options=("Yes", "No"),
+            allows_multiple_answers=False,
+        )
+    )
+    dispatcher = build_dispatcher(
+        bot=bot,
+        orchestrator=orchestrator,  # type: ignore[arg-type]
+        session_manager=sessions,  # type: ignore[arg-type]
+        video_service=FakeVideoService(),  # type: ignore[arg-type]
+        owner_user_id=42,
+        command_cooldown_seconds=0.0,
+        runs_dir=tmp_path / "runs",
+        assistant_polls=assistant_polls,
+    )
+
+    await dispatcher.feed_update(
+        bot,
+        _make_poll_answer_update("assistant-poll-manual", 0, user_id=42, update_id=1),
+    )
+
+    assert orchestrator.submitted
+    prompt, mode, _ = orchestrator.submitted[-1]
+    assert mode == JobMode.EPHEMERAL
+    assert prompt.startswith("The user answered your poll.\nQuestion: Does this poll flow work?")
+    assert "for job" not in prompt

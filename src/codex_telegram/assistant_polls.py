@@ -6,7 +6,7 @@ from dataclasses import dataclass
 @dataclass(slots=True)
 class AssistantPoll:
     poll_id: str
-    source_job_id: int
+    source_job_id: int | None
     chat_id: int
     message_id: int
     question: str
@@ -20,6 +20,9 @@ class AssistantPollStore:
         self._poll_id_by_job: dict[int, str] = {}
 
     def register(self, poll: AssistantPoll) -> None:
+        if poll.source_job_id is None:
+            self._by_poll_id[poll.poll_id] = poll
+            return
         old_poll_id = self._poll_id_by_job.get(poll.source_job_id)
         if old_poll_id:
             self._by_poll_id.pop(old_poll_id, None)
@@ -33,6 +36,8 @@ class AssistantPollStore:
         poll = self._by_poll_id.pop(poll_id, None)
         if poll is None:
             return None
+        if poll.source_job_id is None:
+            return poll
         current = self._poll_id_by_job.get(poll.source_job_id)
         if current == poll_id:
             self._poll_id_by_job.pop(poll.source_job_id, None)

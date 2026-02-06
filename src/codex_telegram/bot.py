@@ -806,7 +806,7 @@ def build_dispatcher(
         active_assistant_polls.register(
             AssistantPoll(
                 poll_id=sent.poll.id,
-                source_job_id=int(sent.message_id),
+                source_job_id=None,
                 chat_id=_chat_id(message),
                 message_id=int(sent.message_id),
                 question=question,
@@ -1460,8 +1460,12 @@ def build_dispatcher(
             await bot.send_message(chat_id=owner_user_id, text="Poll answer had no valid options.")
             return
         selected_text = ", ".join(selected_options)
+        if assistant_poll.source_job_id is None:
+            source_line = "The user answered your poll."
+        else:
+            source_line = f"The user answered your poll for job {assistant_poll.source_job_id}."
         followup_prompt = (
-            f"The user answered your poll for job {assistant_poll.source_job_id}.\n"
+            f"{source_line}\n"
             f"Question: {assistant_poll.question}\n"
             f"Selected option(s): {selected_text}\n\n"
             "Continue from this decision and perform the next concrete step."
