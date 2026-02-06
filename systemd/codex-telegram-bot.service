@@ -1,0 +1,17 @@
+[Unit]
+Description=Codex Telegram Orchestrator Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/gana/vibe_teleggram
+EnvironmentFile=/home/gana/vibe_teleggram/.env
+ExecStart=/usr/bin/env codex-telegram-bot
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
